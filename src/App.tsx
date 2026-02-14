@@ -22,7 +22,7 @@ import {
 import cn from "classnames";
 import "./App.scss";
 import { LiveAPIProvider, useLiveAPIContext } from "./contexts/LiveAPIContext";
-import { LiveClientOptions } from "./types";
+import { LiveClientOptions, StreamingLog } from "./types";
 import { AudioRecorder } from "./lib/audio-recorder";
 import { useWebcam } from "./hooks/use-webcam";
 import { useScreenCapture } from "./hooks/use-screen-capture";
@@ -129,6 +129,16 @@ export type ResponseCard = {
   raw: string;
 };
 
+type LogLevel = "debug" | "info" | "warn" | "error";
+
+type AppLog = {
+  id: string;
+  timestamp: string;
+  level: LogLevel;
+  event: string;
+  details?: string;
+};
+
 const RISK_LEVEL_PRIORITY: Record<RiskLevel, number> = {
   low: 1,
   medium: 2,
@@ -217,6 +227,8 @@ const EMPTY_RESPONSE_CARD: ResponseCard = {
   action: "",
   raw: "",
 };
+
+const MAX_APP_LOGS = 240;
 
 function getLanguage(id: string, fallback: LanguageChoice) {
   return LANGUAGE_BY_ID[id] || fallback;
@@ -326,6 +338,39 @@ function cleanForSpeech(text: string) {
     .replace(/[>*_#-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function truncateForLog(text: string, maxChars = 220) {
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}…`;
+}
+
+function serializeLogDetails(details: unknown): string {
+  if (details == null) {
+    return "";
+  }
+
+  if (typeof details === "string") {
+    return truncateForLog(details);
+  }
+
+  try {
+    const json = JSON.stringify(
+      details,
+      (_, value) => {
+        if (value instanceof Date) {
+          return value.toISOString();
+        }
+        return value;
+      },
+      2,
+    );
+    return truncateForLog(json);
+  } catch {
+    return truncateForLog(String(details));
+  }
 }
 
 export function parseResponseCard(raw: string, heardFallback: string): ResponseCard {
@@ -733,6 +778,7 @@ function NativeConsole() {
   });
   const fallbackTimerRef = useRef<number | null>(null);
   const lastAudioPacketAtRef = useRef<number>(0);
+  const lastAudioDebugLogAtRef = useRef<number>(0);
   const lastTtsAtRef = useRef<number>(0);
   const lastFallbackTextRef = useRef<string>("");
   const intentContextRef = useRef<AutoIntent>("unknown");
@@ -764,6 +810,8 @@ function NativeConsole() {
   const [activeGroundingAction, setActiveGroundingAction] =
     useState<GroundingAction | null>(null);
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
+  const [appLogs, setAppLogs] = useState<AppLog[]>([]);
+  const [verboseLogging, setVerboseLogging] = useState(true);
 
   const [sessionHealth, setSessionHealth] = useState<SessionHealth>({
     permissions: { mic: "unknown", vision: "unknown" },
@@ -776,6 +824,37 @@ function NativeConsole() {
 
   const { client, connected, connect, disconnect, volume, setConfig, setModel } =
     useLiveAPIContext();
+
+  const logEvent = useCallback((level: LogLevel, event: string, details?: unknown) => {
+    const normalizedDetails = serializeLogDetails(details);
+    const timestamp = new Date().toISOString();
+
+    setAppLogs((previous) => [
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        timestamp,
+        level,
+        event,
+        details: normalizedDetails || undefined,
+      },
+      ...previous,
+    ].slice(0, MAX_APP_LOGS));
+
+    if (process.env.NODE_ENV === "test") {
+      return;
+    }
+
+    const message = `[native:${level}] ${event}`;
+    if (level === "error") {
+      console.error(message, details ?? "");
+      return;
+    }
+    if (level === "warn") {
+      console.warn(message, details ?? "");
+      return;
+    }
+    console.log(message, details ?? "");
+  }, []);
 
   const promptContext = useMemo<PromptContext>(
     () => ({
@@ -966,30 +1045,56 @@ function NativeConsole() {
   useEffect(() => {
     setModel(MODEL_NAME);
     setConfig(sessionConfig);
-  }, [sessionConfig, setConfig, setModel]);
+    logEvent("info", "session.config_updated", {
+      model: MODEL_NAME,
+      homeLanguage: homeLanguage.id,
+      voice: activeVoice,
+      riskGuardEnabled,
+    });
+  }, [activeVoice, homeLanguage.id, logEvent, riskGuardEnabled, sessionConfig, setConfig, setModel]);
 
   useEffect(() => {
     setSessionHealth((previous) => ({
       ...previous,
       connected,
     }));
-  }, [connected]);
+    logEvent("info", "session.connection_state", { connected });
+  }, [connected, logEvent]);
 
   useEffect(() => {
     const onError = (error: ErrorEvent) => {
       setLastError(error.message || "Live session reported an error.");
+      logEvent("error", "session.error_event", error.message || "Unknown live API error.");
     };
 
     client.on("error", onError);
     return () => {
       client.off("error", onError);
     };
-  }, [client, setLastError]);
+  }, [client, logEvent, setLastError]);
+
+  useEffect(() => {
+    const onClientLog = (eventLog: StreamingLog) => {
+      if (!verboseLogging && eventLog.type === "client.realtimeInput") {
+        return;
+      }
+      logEvent("debug", `client.${eventLog.type}`, eventLog.message);
+    };
+
+    client.on("log", onClientLog);
+    return () => {
+      client.off("log", onClientLog);
+    };
+  }, [client, logEvent, verboseLogging]);
 
   useEffect(() => {
     const onAudioPacket = () => {
       lastAudioPacketAtRef.current = Date.now();
       setSpeechHealth("audio_streaming");
+      if (Date.now() - lastAudioDebugLogAtRef.current > 2000) {
+        lastAudioDebugLogAtRef.current = Date.now();
+        logEvent("debug", "audio.packet_received");
+      }
       if (fallbackTimerRef.current) {
         window.clearTimeout(fallbackTimerRef.current);
         fallbackTimerRef.current = null;
@@ -1000,7 +1105,7 @@ function NativeConsole() {
     return () => {
       client.off("audio", onAudioPacket);
     };
-  }, [client]);
+  }, [client, logEvent]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -1027,6 +1132,10 @@ function NativeConsole() {
   }, []);
 
   useEffect(() => {
+    logEvent("info", "audio.speech_health_changed", { speechHealth });
+  }, [logEvent, speechHealth]);
+
+  useEffect(() => {
     if (!connected) {
       return;
     }
@@ -1046,7 +1155,8 @@ function NativeConsole() {
       ],
       false,
     );
-  }, [autoIntent, client, connected]);
+    logEvent("debug", "intent.context_sent", { autoIntent });
+  }, [autoIntent, client, connected, logEvent]);
 
   useEffect(() => {
     if (!navigator.permissions?.query) {
@@ -1496,6 +1606,31 @@ function NativeConsole() {
       ...previous,
     ].slice(0, 24));
   }, []);
+
+  const clearDebugLogs = useCallback(() => {
+    setAppLogs([]);
+  }, []);
+
+  const copyDebugLogs = useCallback(async () => {
+    try {
+      const payload = appLogs
+        .slice()
+        .reverse()
+        .map((item) => {
+          const details = item.details ? ` | ${item.details}` : "";
+          return `${item.timestamp} [${item.level}] ${item.event}${details}`;
+        })
+        .join("\n");
+      if (!payload) {
+        logEvent("warn", "debug.copy_skipped", "No logs available to copy.");
+        return;
+      }
+      await navigator.clipboard.writeText(payload);
+      logEvent("info", "debug.copy_success", { count: appLogs.length });
+    } catch (error) {
+      logEvent("error", "debug.copy_failed", toErrorMessage(error, "Clipboard copy failed."));
+    }
+  }, [appLogs, logEvent]);
 
   const runGroundingAction = useCallback(
     (action: GroundingAction) => {
