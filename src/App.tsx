@@ -38,8 +38,9 @@ const MODEL_NAME =
 
 const RISK_FUNCTION_NAME = "emit_risk_signal";
 const SUGGESTION_FUNCTION_NAME = "emit_suggestion";
+const MODE_SIGNAL_FUNCTION_NAME = "emit_mode_signal";
 
-type NativeMode = "SPOT" | "ECHO" | "GUIDE" | "BRIDGE" | "SHIELD";
+type NativeMode = "SPOT" | "ECHO" | "GUIDE" | "BRIDGE" | "SHIELD" | "AUTO";
 type PermissionFlag = "unknown" | "granted" | "denied" | "prompt";
 type RiskType = "price" | "misinformation" | "urgency";
 type RiskLevel = "low" | "medium" | "high";
@@ -277,6 +278,10 @@ const MODE_DETAILS: Record<NativeMode, { title: string; blurb: string }> = {
     title: "Shield",
     blurb: "Proactive guardian — analyses surroundings to keep you safe & savvy.",
   },
+  AUTO: {
+    title: "Auto",
+    blurb: "Adapts to your situation automatically — no manual switching needed.",
+  },
 };
 
 const SAFETY_PROFILE: SafetyProfile = {
@@ -342,6 +347,17 @@ const DEMO_SCENES: DemoScene[] = [
     requiresVision: true,
     scriptHint:
       "Shield mode: analyse surroundings via camera and mic, flag overcharges, scams, and safety issues proactively.",
+  },
+  {
+    id: "scene-auto",
+    label: "Scene: Auto Adapt",
+    mode: "AUTO",
+    sourceLanguage: "kn-IN",
+    targetLanguage: "hi-IN",
+    requiresSearch: true,
+    requiresVision: true,
+    scriptHint:
+      "Auto mode: adapts behavior based on what it hears and sees. No manual mode switching needed.",
   },
 ];
 
@@ -552,6 +568,7 @@ function buildModeInstruction(
     GUIDE: `CURRENT MODE: GUIDE\nUse what you see + what user asks + grounding when needed. Always end with Step 1, Step 2, Step 3 in ${targetLanguage.label}.`,
     BRIDGE: `CURRENT MODE: BRIDGE\nBidirectional interpretation. If speaker uses ${sourceLanguage.label}, translate to ${targetLanguage.label}; if speaker uses ${targetLanguage.label}, translate to ${sourceLanguage.label}. Output translation only.`,
     SHIELD: `CURRENT MODE: SHIELD (Smart Guardian)\nYou are an active guardian analysing the user's surroundings through camera and microphone in real time.\nYour job is to PROTECT the user. Continuously watch and listen for:\n- Overpriced items, tourist traps, hidden charges, inflated fares\n- Scam patterns: pressure tactics, fake authority, misleading claims, bait-and-switch\n- Physical safety concerns: traffic hazards, suspicious behavior, crowded exits\n- Negotiation opportunities: compare with fair market rates, suggest counter-offers\n\nWhen you detect something, call the ${SUGGESTION_FUNCTION_NAME} function with category, title, detail, action, and confidence.\nKeep spoken output minimal and in ${targetLanguage.label} — prefer structured suggestions over long narration.\nOnly speak aloud for HIGH urgency situations. For everything else, emit a suggestion silently.\nWhen asked a question, respond helpfully in ${targetLanguage.label}.`,
+    AUTO: `CURRENT MODE: AUTO (Adaptive)\nYou have ALL capabilities active simultaneously. Analyse what you hear and see in real time and automatically choose the best behavior:\n\nBEHAVIOR PROFILES (use whichever fits the current context):\n1. SPOT — When camera shows text, signs, labels, documents, menus → read and explain them in ${targetLanguage.label}.\n2. ECHO — When you hear speech in ${sourceLanguage.label} or another language → translate it into ${targetLanguage.label}. Output only translation.\n3. GUIDE — When user asks a question, needs directions, or wants help with a process → answer with Step 1, Step 2, Step 3 in ${targetLanguage.label}. Use grounding/search when helpful.\n4. BRIDGE — When two people are conversing in different languages → interpret bidirectionally between ${sourceLanguage.label} and ${targetLanguage.label}.\n5. SHIELD — When you detect overpriced items, scam patterns, pressure tactics, safety concerns → call ${SUGGESTION_FUNCTION_NAME} with category, title, detail, action, confidence.\n\nAfter choosing, call ${MODE_SIGNAL_FUNCTION_NAME} with the behavior name so the UI shows what you are doing.\n\nRULES:\n- Seamlessly switch between behaviors as context changes.\n- Do NOT announce mode switches verbally. Just act.\n- Keep all output in ${targetLanguage.label} unless bridging.\n- Always be alert for risks (price, scam, safety) regardless of active behavior.\n- Keep responses short and actionable.`,
   };
 
   return prompts[mode];
@@ -617,9 +634,10 @@ function buildConfig(
   searchEnabled: boolean,
   riskGuardEnabled: boolean,
 ): LiveConnectConfig {
+  const isAutoMode = promptContext.mode === "AUTO";
   const tools: Tool[] = [];
 
-  if ((promptContext.mode === "GUIDE" || promptContext.mode === "SHIELD") && searchEnabled) {
+  if ((promptContext.mode === "GUIDE" || promptContext.mode === "SHIELD" || isAutoMode) && searchEnabled) {
     tools.push({ googleSearch: {} });
   }
 
@@ -627,8 +645,29 @@ function buildConfig(
   if (riskGuardEnabled) {
     fnDeclarations.push(RISK_FUNCTION_DECLARATION);
   }
-  if (promptContext.mode === "SHIELD") {
+  if (promptContext.mode === "SHIELD" || isAutoMode) {
     fnDeclarations.push(SUGGESTION_FUNCTION_DECLARATION);
+  }
+  if (isAutoMode) {
+    fnDeclarations.push({
+      name: MODE_SIGNAL_FUNCTION_NAME,
+      description: "Report which behavior profile you are currently using so the UI can display it.",
+      parameters: {
+        type: Type.OBJECT,
+        properties: {
+          behavior: {
+            type: Type.STRING,
+            enum: ["SPOT", "ECHO", "GUIDE", "BRIDGE", "SHIELD"],
+            description: "The behavior profile currently active.",
+          },
+          reason: {
+            type: Type.STRING,
+            description: "Short reason for choosing this behavior.",
+          },
+        },
+        required: ["behavior", "reason"],
+      },
+    });
   }
   if (fnDeclarations.length) {
     tools.push({ functionDeclarations: fnDeclarations });
@@ -685,6 +724,8 @@ function NativeConsole() {
   const [currentRisk, setCurrentRisk] = useState<RiskSignal | null>(null);
   const [riskHistory, setRiskHistory] = useState<RiskSignal[]>([]);
   const [suggestions, setSuggestions] = useState<SmartSuggestion[]>([]);
+  const [autoDetectedBehavior, setAutoDetectedBehavior] = useState<string | null>(null);
+  const [autoDetectedReason, setAutoDetectedReason] = useState<string | null>(null);
 
   const [inputDraft, setInputDraft] = useState("");
   const [lastInputTranscript, setLastInputTranscript] = useState("");
@@ -1181,6 +1222,23 @@ function NativeConsole() {
           };
         }
 
+        // Handle mode signal (Auto mode)
+        if (functionCall.name === MODE_SIGNAL_FUNCTION_NAME) {
+          const args = functionCall.args || {};
+          const behavior = String(args.behavior || "").trim();
+          const reason = String(args.reason || "").trim();
+          const validBehaviors = ["SPOT", "ECHO", "GUIDE", "BRIDGE", "SHIELD"];
+          if (validBehaviors.includes(behavior)) {
+            setAutoDetectedBehavior(behavior);
+            setAutoDetectedReason(reason);
+          }
+          return {
+            id: functionCall.id,
+            name: functionCall.name,
+            response: { output: { accepted: true, reason: "Mode signal received." } },
+          };
+        }
+
         // Unknown function
         return {
           id: functionCall.id,
@@ -1366,10 +1424,13 @@ function NativeConsole() {
     { label: "Seeing", active: connected && visionEnabled },
     {
       label: "Searching",
-      active: connected && (activeMode === "GUIDE" || activeMode === "SHIELD") && searchEnabled,
+      active: connected && (activeMode === "GUIDE" || activeMode === "SHIELD" || activeMode === "AUTO") && searchEnabled,
     },
     { label: "Speaking", active: connected && volume > 0.05 },
-    { label: "Guarding", active: connected && activeMode === "SHIELD" },
+    { label: "Guarding", active: connected && (activeMode === "SHIELD" || activeMode === "AUTO") },
+    ...(activeMode === "AUTO" && autoDetectedBehavior
+      ? [{ label: `Behavior: ${autoDetectedBehavior}`, active: true }]
+      : []),
   ];
 
   return (
@@ -1523,10 +1584,10 @@ function NativeConsole() {
             <button
               className={cn("control-chip", {
                 active: searchEnabled,
-                disabled: activeMode !== "GUIDE" && activeMode !== "SHIELD",
+                disabled: activeMode !== "GUIDE" && activeMode !== "SHIELD" && activeMode !== "AUTO",
               })}
               onClick={() => setSearchEnabled((value) => !value)}
-              disabled={activeMode !== "GUIDE" && activeMode !== "SHIELD"}
+              disabled={activeMode !== "GUIDE" && activeMode !== "SHIELD" && activeMode !== "AUTO"}
             >
               Search {searchEnabled ? "On" : "Off"}
             </button>
@@ -1597,7 +1658,7 @@ function NativeConsole() {
           </div>
         </section>
 
-        {activeMode === "SHIELD" && (
+        {(activeMode === "SHIELD" || activeMode === "AUTO") && (
           <section className="suggestion-panel">
             <div className="panel-head">
               <strong>🛡️ Smart Guardian</strong>
