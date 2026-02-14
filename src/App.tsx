@@ -37,37 +37,19 @@ const MODEL_NAME =
   "models/gemini-2.5-flash-native-audio-preview-12-2025";
 
 const RISK_FUNCTION_NAME = "emit_risk_signal";
-const SUGGESTION_FUNCTION_NAME = "emit_suggestion";
-const MODE_SIGNAL_FUNCTION_NAME = "emit_mode_signal";
 const FORMATTED_CONTENT_FUNCTION_NAME = "emit_formatted_content";
 
-type NativeMode = "SPOT" | "ECHO" | "GUIDE" | "BRIDGE" | "SHIELD" | "AUTO";
+/* ─── Types ─── */
+
+type NativeMode = "GUIDE" | "SPOT" | "BRIDGE";
 type PermissionFlag = "unknown" | "granted" | "denied" | "prompt";
 type RiskType = "price" | "misinformation" | "urgency";
 type RiskLevel = "low" | "medium" | "high";
-type SuggestionCategory = "overspend" | "scam" | "safety" | "negotiation" | "general";
-
-type SmartSuggestion = {
-  id: string;
-  category: SuggestionCategory;
-  title: string;
-  detail: string;
-  action: string;
-  confidence: number;
-  timestamp: string;
-  source: "model" | "heuristic";
-};
 
 type LanguageChoice = {
   id: string;
   label: string;
   display: string;
-};
-
-type TranscriptEntry = {
-  id: string;
-  speaker: "native" | "you";
-  text: string;
 };
 
 type FormattedContentType = "menu" | "document" | "form" | "sign" | "table" | "general";
@@ -81,46 +63,6 @@ type FormattedContent = {
   timestamp: string;
 };
 
-type SafetyProfile = {
-  disallowMedicalLegalAdvice: boolean;
-  explainOfficialInstructionsOnly: boolean;
-};
-
-type DemoScene = {
-  id: string;
-  label: string;
-  mode: NativeMode;
-  sourceLanguage: string;
-  targetLanguage: string;
-  requiresSearch: boolean;
-  requiresVision: boolean;
-  scriptHint: string;
-};
-
-type SessionHealth = {
-  permissions: {
-    mic: PermissionFlag;
-    vision: PermissionFlag;
-  };
-  connected: boolean;
-  reconnecting: boolean;
-  lastError: string | null;
-};
-
-type RiskPolicy = {
-  enabledTypes: RiskType[];
-  minConfidenceForMedium: number;
-  minConfidenceForHigh: number;
-  cooldownMs: number;
-  useSearchForPriceBaseline: boolean;
-};
-
-type ProactivityPolicy = {
-  style: "contextual-assist";
-  speakOnlyOnHighConfidenceRisk: boolean;
-  avoidNarrationSpam: boolean;
-};
-
 type UserLocation = {
   latitude: number;
   longitude: number;
@@ -132,13 +74,9 @@ type UserLocation = {
 } | null;
 
 type PromptContext = {
-  mode: NativeMode | null;
+  mode: NativeMode;
   sourceLanguage: LanguageChoice;
   targetLanguage: LanguageChoice;
-  safetyProfile: SafetyProfile;
-  sceneContext: string;
-  riskPolicy: RiskPolicy;
-  proactivityPolicy: ProactivityPolicy;
   userLocation: UserLocation;
 };
 
@@ -157,35 +95,67 @@ type RiskSignal = {
   source: "model" | "heuristic";
 };
 
-type RiskGuardState = {
-  enabled: boolean;
-  currentRisk: RiskSignal | null;
-  history: RiskSignal[];
+type SessionHealth = {
+  permissions: {
+    mic: PermissionFlag;
+    vision: PermissionFlag;
+  };
+  connected: boolean;
+  reconnecting: boolean;
+  lastError: string | null;
 };
 
-// Architecture hooks for future Blind Mode implementation.
-export type BlindInsight = {
-  id: string;
-  summary: string;
-  confidence: number;
-  timestamp: string;
+type RiskPolicy = {
+  enabledTypes: RiskType[];
+  minConfidenceForMedium: number;
+  minConfidenceForHigh: number;
+  cooldownMs: number;
 };
 
-export type NavigationCue = {
-  direction: string;
-  hazard: string;
-  action: string;
+/* ─── Constants ─── */
+
+const LANGUAGES: LanguageChoice[] = [
+  { id: "hi-IN", label: "Hindi", display: "हिन्दी" },
+  { id: "kn-IN", label: "Kannada", display: "ಕನ್ನಡ" },
+  { id: "en-IN", label: "English", display: "English" },
+  { id: "bn-IN", label: "Bengali", display: "বাংলা" },
+  { id: "mr-IN", label: "Marathi", display: "मराठी" },
+  { id: "ta-IN", label: "Tamil", display: "தமிழ்" },
+  { id: "te-IN", label: "Telugu", display: "తెలుగు" },
+];
+
+const VOICES = ["Kore", "Aoede", "Puck", "Charon"];
+
+const MODE_DETAILS: Record<NativeMode, { title: string; icon: string; blurb: string }> = {
+  GUIDE: {
+    title: "Guide",
+    icon: "🗣️",
+    blurb: "Ask anything — voice-first personal assistant.",
+  },
+  SPOT: {
+    title: "Spot",
+    icon: "📷",
+    blurb: "Point your camera — reads signs, menus \u0026 documents.",
+  },
+  BRIDGE: {
+    title: "Bridge",
+    icon: "🌉",
+    blurb: "Translates what's happening around you.",
+  },
 };
 
-export type ConversationSafetyCue = {
-  cue: string;
-  riskType: "ripoff" | "misleading" | "urgency";
-  recommendation: string;
+const MODE_PRESETS: Record<NativeMode, { mic: boolean; camera: boolean; search: boolean }> = {
+  GUIDE: { mic: true, camera: false, search: true },
+  SPOT: { mic: true, camera: true, search: true },
+  BRIDGE: { mic: true, camera: false, search: false },
 };
 
-const FEATURE_FLAGS = {
-  blindMode: false,
-} as const;
+const RISK_POLICY: RiskPolicy = {
+  enabledTypes: ["price", "misinformation", "urgency"],
+  minConfidenceForMedium: 0.62,
+  minConfidenceForHigh: 0.78,
+  cooldownMs: 18000,
+};
 
 const RISK_LEVEL_PRIORITY: Record<RiskLevel, number> = {
   low: 1,
@@ -235,39 +205,6 @@ const RISK_FUNCTION_DECLARATION: FunctionDeclaration = {
   },
 };
 
-const SUGGESTION_FUNCTION_DECLARATION: FunctionDeclaration = {
-  name: SUGGESTION_FUNCTION_NAME,
-  description:
-    "Emit a proactive suggestion when you detect an opportunity to help the user save money, avoid scams, stay safe, or negotiate better.",
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      category: {
-        type: Type.STRING,
-        enum: ["overspend", "scam", "safety", "negotiation", "general"],
-        description: "The suggestion category.",
-      },
-      title: {
-        type: Type.STRING,
-        description: "Short one-line title summarizing the suggestion.",
-      },
-      detail: {
-        type: Type.STRING,
-        description: "2-3 sentence explanation of what was detected and why it matters.",
-      },
-      action: {
-        type: Type.STRING,
-        description: "Concrete next step the user should take.",
-      },
-      confidence: {
-        type: Type.NUMBER,
-        description: "Model confidence from 0.0 to 1.0.",
-      },
-    },
-    required: ["category", "title", "detail", "action", "confidence"],
-  },
-};
-
 const FORMATTED_CONTENT_DECLARATION: FunctionDeclaration = {
   name: FORMATTED_CONTENT_FUNCTION_NAME,
   description:
@@ -297,122 +234,6 @@ const FORMATTED_CONTENT_DECLARATION: FunctionDeclaration = {
   },
 };
 
-const LANGUAGES: LanguageChoice[] = [
-  { id: "hi-IN", label: "Hindi", display: "हिन्दी" },
-  { id: "kn-IN", label: "Kannada", display: "ಕನ್ನಡ" },
-  { id: "en-IN", label: "English", display: "English" },
-  { id: "bn-IN", label: "Bengali", display: "বাংলা" },
-  { id: "mr-IN", label: "Marathi", display: "मराठी" },
-  { id: "ta-IN", label: "Tamil", display: "தமிழ்" },
-  { id: "te-IN", label: "Telugu", display: "తెలుగు" },
-];
-
-const VOICES = ["Kore", "Aoede", "Puck", "Charon"];
-
-const MODE_DETAILS: Record<NativeMode, { title: string; blurb: string }> = {
-  SPOT: {
-    title: "Spot",
-    blurb: "Camera-first local reading and translation.",
-  },
-  ECHO: {
-    title: "Echo",
-    blurb: "Ambient listening with live translation.",
-  },
-  GUIDE: {
-    title: "Guide",
-    blurb: "What you see + what you ask + live grounding.",
-  },
-  BRIDGE: {
-    title: "Bridge",
-    blurb: "Two-way live conversation interpreter.",
-  },
-  SHIELD: {
-    title: "Shield",
-    blurb: "Proactive guardian — analyses surroundings to keep you safe & savvy.",
-  },
-  AUTO: {
-    title: "Auto",
-    blurb: "Adapts to your situation automatically — no manual switching needed.",
-  },
-};
-
-const SAFETY_PROFILE: SafetyProfile = {
-  disallowMedicalLegalAdvice: true,
-  explainOfficialInstructionsOnly: true,
-};
-
-const RISK_POLICY: RiskPolicy = {
-  enabledTypes: ["price", "misinformation", "urgency"],
-  minConfidenceForMedium: 0.62,
-  minConfidenceForHigh: 0.78,
-  cooldownMs: 18000,
-  useSearchForPriceBaseline: true,
-};
-
-const PROACTIVITY_POLICY: ProactivityPolicy = {
-  style: "contextual-assist",
-  speakOnlyOnHighConfidenceRisk: true,
-  avoidNarrationSpam: true,
-};
-
-const DEMO_SCENES: DemoScene[] = [
-  {
-    id: "scene-a-guide",
-    label: "Scene A: Form Help",
-    mode: "GUIDE",
-    sourceLanguage: "kn-IN",
-    targetLanguage: "hi-IN",
-    requiresSearch: true,
-    requiresVision: true,
-    scriptHint:
-      "Guide mode: catch misinformation risk while explaining a government form. Ask: 'Yeh form kaise bharein? Mujhe kya chahiye?'",
-  },
-  {
-    id: "scene-b-echo",
-    label: "Scene B: Announcement",
-    mode: "ECHO",
-    sourceLanguage: "kn-IN",
-    targetLanguage: "hi-IN",
-    requiresSearch: false,
-    requiresVision: false,
-    scriptHint:
-      "Echo mode: extract urgency from a Kannada announcement and output clean Hindi translation with action cue.",
-  },
-  {
-    id: "scene-c-bridge",
-    label: "Scene C: Conversation",
-    mode: "BRIDGE",
-    sourceLanguage: "hi-IN",
-    targetLanguage: "kn-IN",
-    requiresSearch: false,
-    requiresVision: false,
-    scriptHint:
-      "Bridge mode: Hindi <-> Kannada conversation with possible rip-off/overcharge cue detection.",
-  },
-  {
-    id: "scene-shield",
-    label: "Scene: Smart Guardian",
-    mode: "SHIELD",
-    sourceLanguage: "kn-IN",
-    targetLanguage: "hi-IN",
-    requiresSearch: true,
-    requiresVision: true,
-    scriptHint:
-      "Shield mode: analyse surroundings via camera and mic, flag overcharges, scams, and safety issues proactively.",
-  },
-  {
-    id: "scene-auto",
-    label: "Scene: Auto Adapt",
-    mode: "AUTO",
-    sourceLanguage: "kn-IN",
-    targetLanguage: "hi-IN",
-    requiresSearch: true,
-    requiresVision: true,
-    scriptHint:
-      "Auto mode: adapts behavior based on what it hears and sees. No manual mode switching needed.",
-  },
-];
-
 const LANGUAGE_BY_ID = LANGUAGES.reduce<Record<string, LanguageChoice>>(
   (map, language) => {
     map[language.id] = language;
@@ -430,6 +251,8 @@ const DEFAULT_SOURCE_LANGUAGE =
   LANGUAGE_BY_ID[process.env.REACT_APP_DEFAULT_SOURCE_LANG || ""] ||
   LANGUAGE_BY_ID["kn-IN"] ||
   LANGUAGES[0];
+
+/* ─── Helpers ─── */
 
 function getLanguage(id: string, fallback: LanguageChoice) {
   return LANGUAGE_BY_ID[id] || fallback;
@@ -526,28 +349,13 @@ function detectHeuristicRisk(
   const lower = text.toLowerCase();
 
   const urgencyKeywords = [
-    "immediately",
-    "urgent",
-    "fine",
-    "penalty",
-    "police",
-    "last warning",
-    "deadline",
-    "jaldi",
-    "tatkal",
-    "ತಕ್ಷಣ",
-    "ದಂಡ",
+    "immediately", "urgent", "fine", "penalty", "police",
+    "last warning", "deadline", "jaldi", "tatkal", "ತಕ್ಷಣ", "ದಂಡ",
   ];
 
   const misinformationKeywords = [
-    "agent",
-    "shortcut",
-    "sign quickly",
-    "don't read",
-    "different office",
-    "extra charge for form",
-    "commission",
-    "broker",
+    "agent", "shortcut", "sign quickly", "don't read",
+    "different office", "extra charge for form", "commission", "broker",
   ];
 
   const priceHints = /(₹|rs\.?|rupees|fare|charge|fees|price|rate|cost|ticket|rent)/i;
@@ -605,22 +413,68 @@ function detectHeuristicRisk(
   return null;
 }
 
+/* ─── Prompt Building ─── */
+
 function buildModeInstruction(
-  mode: NativeMode | null,
+  mode: NativeMode,
   sourceLanguage: LanguageChoice,
   targetLanguage: LanguageChoice,
 ) {
-  if (!mode) {
-    return `CURRENT MODE: STANDBY\nOnly respond when asked. Keep output concise and in ${targetLanguage.label}.`;
-  }
-
   const prompts: Record<NativeMode, string> = {
-    SPOT: `CURRENT MODE: SPOT\nFocus on camera input. Proactively read visible text and explain what user should do next in ${targetLanguage.label}.\nFor complex visual content (menus, documents, forms, timetables, signs with multiple items), speak a brief audio summary and ALSO call ${FORMATTED_CONTENT_FUNCTION_NAME} with a detailed markdown breakdown translated into ${targetLanguage.label}. Use tables for prices, bullet lists for items, and headers for sections. Always call the function for any content with more than 3 items or structured data.`,
-    ECHO: `CURRENT MODE: ECHO\nTranslate incoming speech into ${targetLanguage.label}. Output only translation. Preserve tone. Stay silent for non-speech/silence.`,
-    GUIDE: `CURRENT MODE: GUIDE\nUse what you see + what user asks + grounding when needed. Always end with Step 1, Step 2, Step 3 in ${targetLanguage.label}.`,
-    BRIDGE: `CURRENT MODE: BRIDGE\nBidirectional interpretation. If speaker uses ${sourceLanguage.label}, translate to ${targetLanguage.label}; if speaker uses ${targetLanguage.label}, translate to ${sourceLanguage.label}. Output translation only.`,
-    SHIELD: `CURRENT MODE: SHIELD (Smart Guardian)\nYou are an active guardian analysing the user's surroundings through camera and microphone in real time.\nYour job is to PROTECT the user. Continuously watch and listen for:\n- Overpriced items, tourist traps, hidden charges, inflated fares\n- Scam patterns: pressure tactics, fake authority, misleading claims, bait-and-switch\n- Physical safety concerns: traffic hazards, suspicious behavior, crowded exits\n- Negotiation opportunities: compare with fair market rates, suggest counter-offers\n\nWhen you detect something, call the ${SUGGESTION_FUNCTION_NAME} function with category, title, detail, action, and confidence.\nKeep spoken output minimal and in ${targetLanguage.label} — prefer structured suggestions over long narration.\nOnly speak aloud for HIGH urgency situations. For everything else, emit a suggestion silently.\nWhen asked a question, respond helpfully in ${targetLanguage.label}.`,
-    AUTO: `CURRENT MODE: AUTO (Adaptive)\nYou have ALL capabilities active simultaneously. Analyse what you hear and see in real time and automatically choose the best behavior:\n\nBEHAVIOR PROFILES (use whichever fits the current context):\n1. SPOT — When camera shows text, signs, labels, documents, menus → read and explain them in ${targetLanguage.label}.\n2. ECHO — When you hear speech in ${sourceLanguage.label} or another language → translate it into ${targetLanguage.label}. Output only translation.\n3. GUIDE — When user asks a question, needs directions, or wants help with a process → answer with Step 1, Step 2, Step 3 in ${targetLanguage.label}. Use grounding/search when helpful.\n4. BRIDGE — When two people are conversing in different languages → interpret bidirectionally between ${sourceLanguage.label} and ${targetLanguage.label}.\n5. SHIELD — When you detect overpriced items, scam patterns, pressure tactics, safety concerns → call ${SUGGESTION_FUNCTION_NAME} with category, title, detail, action, confidence.\n\nAfter choosing, call ${MODE_SIGNAL_FUNCTION_NAME} with the behavior name so the UI shows what you are doing.\n\nRULES:\n- Seamlessly switch between behaviors as context changes.\n- Do NOT announce mode switches verbally. Just act.\n- Keep all output in ${targetLanguage.label} unless bridging.\n- Always be alert for risks (price, scam, safety) regardless of active behavior.\n- Keep responses short and actionable.`,
+    GUIDE: `CURRENT MODE: GUIDE (Voice Assistant)
+
+You are having a direct voice conversation with the user. They will speak to you through their microphone and you respond in audio.
+
+YOUR JOB:
+- Listen to the user's questions and requests.
+- Answer clearly in ${targetLanguage.label} with practical, step-by-step guidance.
+- Use Google Search grounding when the question involves local information: bus routes, train timings, government office procedures, local prices, customs, or anything you are not 100% certain about.
+- Always structure complex answers as numbered steps: "Step 1… Step 2… Step 3…"
+- If the user describes a situation (e.g. "someone is asking me to pay ₹500 for a form"), proactively assess whether it sounds legitimate and advise accordingly.
+
+BEHAVIORAL RULES:
+- Stay silent during silence. Do not narrate or fill gaps.
+- Keep responses under 3–4 sentences unless the user asks for more detail.
+- If you hear ambient noise that is not directed at you, ignore it.
+- If the user switches to a different language, still respond in ${targetLanguage.label}.`,
+
+    SPOT: `CURRENT MODE: SPOT (Camera Companion)
+
+You have access to both the user's microphone and camera. You can see what they see and hear what they say.
+
+YOUR JOB:
+1. PROACTIVE VISUAL READING: When you see text, signs, labels, menus, notices, timetables, or documents in the camera — read them aloud and explain what they mean and what the user should do, all in ${targetLanguage.label}.
+2. COMPLEX CONTENT → FORMATTED OUTPUT: When you see content with more than 3 items or structured data (menus with prices, timetables, forms with fields, multi-line notices), do BOTH:
+   a. Speak a brief audio summary (2–3 sentences, key points only).
+   b. Call the ${FORMATTED_CONTENT_FUNCTION_NAME} function with a full markdown breakdown translated into ${targetLanguage.label}. Use tables for prices, bullet lists for items, and headers for sections.
+3. CONVERSATIONAL: The user can also ask you questions about what they see or about anything else. Answer in ${targetLanguage.label} with step-by-step guidance. Use Google Search grounding for local facts.
+4. RISK DETECTION: If you see or hear pricing that seems inflated, a suspicious sign, or a misleading notice — flag it via ${RISK_FUNCTION_NAME}.
+
+BEHAVIORAL RULES:
+- When nothing new is visible, stay silent. Do not narrate the same scene repeatedly.
+- Prioritize what's most actionable: prices, directions, deadlines, warnings.
+- When reading a sign in ${sourceLanguage.label}, translate it naturally — don't read the original aloud unless the user asks.
+- For documents and forms: explain each field's purpose and what the user should fill in.`,
+
+    BRIDGE: `CURRENT MODE: BRIDGE (Ambient Interpreter)
+
+You are a passive listener translating the world around the user. The user's microphone picks up ambient speech — announcements, conversations, vendor calls, PA systems — and your job is to translate them into ${targetLanguage.label} so the user understands what is happening around them.
+
+YOUR JOB:
+- Listen to all incoming speech. Identify the language being spoken.
+- If the speech is in ${sourceLanguage.label} or any language other than ${targetLanguage.label}, translate it into ${targetLanguage.label} and speak the translation.
+- Preserve the tone, urgency, and intent of the original speech.
+- For announcements (train, bus, PA systems): extract the key information (platform, time, destination, action required) and state it clearly.
+- For conversations: provide a brief summary of what was said, not a word-for-word relay.
+- If someone speaks directly TO the user in ${sourceLanguage.label}, translate what they said and then suggest a response the user could give back.
+
+BEHAVIORAL RULES:
+- Output ONLY translations and summaries. Do not add commentary, analysis, or opinions.
+- Stay completely silent during silence or non-speech noise (traffic, music, etc.).
+- When multiple people are speaking, focus on the loudest or most relevant speaker.
+- Keep translations short and natural — aim for how a friend sitting next to you would whisper "they said…"
+- If you detect urgency in an announcement (e.g. "last call", "platform change"), emphasize it in your translation.
+- If you detect risk in what's being said (overcharge, scam, pressure), flag it via ${RISK_FUNCTION_NAME} but still translate the content.`,
   };
 
   return prompts[mode];
@@ -628,112 +482,69 @@ function buildModeInstruction(
 
 function buildLocationBlock(location: UserLocation): string {
   if (!location) return "";
-  return `\nUSER LOCATION (live):\n- City/Area: ${location.area}, ${location.city}, ${location.state}\n- GPS: ${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}\n- Local time: ${location.localTime}\n- IMPORTANT: Factor the user's location and local time into ALL responses. Use location for price comparisons, directions, local customs, safety context, nearby landmarks, and time-appropriate suggestions. If the user asks "where" or "how to get to", use their GPS as the starting point.`;
+  return `\nUSER LOCATION (live):
+- City/Area: ${location.area}, ${location.city}, ${location.state}
+- GPS: ${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}
+- Local time: ${location.localTime}
+- IMPORTANT: Factor the user's location and local time into ALL responses. Use location for price comparisons, directions, local customs, safety context, nearby landmarks, and time-appropriate suggestions. If the user asks "where" or "how to get to", use their GPS as the starting point.`;
 }
 
 function buildSystemPrompt({
   mode,
   sourceLanguage,
   targetLanguage,
-  safetyProfile,
-  sceneContext,
-  riskPolicy,
-  proactivityPolicy,
   userLocation,
 }: PromptContext) {
-  const safetyLines = [
-    safetyProfile.disallowMedicalLegalAdvice
-      ? "SAFETY: Never provide medical or legal diagnosis, prescriptions, verdicts, or legal strategy."
-      : "",
-    safetyProfile.explainOfficialInstructionsOnly
-      ? "SAFETY: You may translate and explain official instructions from documents, notices, staff announcements, and forms in plain language."
-      : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const riskTypes = riskPolicy.enabledTypes.join(", ");
   const locationBlock = buildLocationBlock(userLocation);
 
-  return `You are native, a realtime multimodal local companion for India.
+  return `You are Awaaz — a realtime voice-first companion for migrants and travellers in India.
 
-MISSION:
-Help internal migrants become local faster by combining seeing, hearing, grounding, and practical next actions.
-
-CORE RULES:
-- Preferred output is ${targetLanguage.label} (${targetLanguage.display}), unless BRIDGE mode requires opposite direction.
-- Keep outputs short, practical, and actionable.
-- Avoid filler narration.
+IDENTITY & TONE:
+- You are a trusted local friend who speaks clearly and simply.
+- Always respond in ${targetLanguage.label} (${targetLanguage.display}) unless BRIDGE mode requires the opposite direction.
+- Be warm but concise. Prefer short, actionable sentences over long explanations.
+- Never use filler phrases like "Sure!", "Of course!", "Great question!" — just answer.
 
 ${buildModeInstruction(mode, sourceLanguage, targetLanguage)}
 
-PROACTIVITY POLICY:
-- Style: ${proactivityPolicy.style}
-- Speak proactively only when confidence is high for meaningful risk or user asks explicitly.
-- Avoid narration spam during silence or low-signal context.
+SAFETY RULES:
+- Never provide medical diagnoses, legal verdicts, or prescriptions.
+- You may translate and explain official documents, notices, and forms in plain language.
+- If you are unsure about something, say so honestly. Do not make up facts.
 
-LOCAL RISK GUARD:
-- Watch for risk types: ${riskTypes}
-- If actionable risk is detected, call function ${RISK_FUNCTION_NAME} with cue, reason, one-line action, level, and confidence.
-- For price risk, compare stated amount with context and grounding when available.
-- For misinformation risk, flag contradictions and suspicious process instructions.
-- For urgency risk, flag pressure cues, fines, penalties, or emergency language.
-
-${safetyLines}${locationBlock}
+LOCAL RISK AWARENESS (always active):
+- Continuously monitor for these risk types in what you hear and see: price gouging, misinformation, urgency/pressure tactics.
+- When you detect actionable risk, call the ${RISK_FUNCTION_NAME} function with: type, level (low/medium/high), cue (the trigger), reason, action (one-line next step for user), and confidence (0.0–1.0).
+- For price risks, compare stated amounts against local context or grounding data.
+- For misinformation, flag contradictions with official processes.
+- For urgency, flag pressure language (deadlines, fines, threats).
+${locationBlock}
 
 LIVE CONTEXT:
-- Source language context: ${sourceLanguage.label}
-- Target language context: ${targetLanguage.label}
-- Current scene focus: ${sceneContext || "General exploration"}`;
+- Local language: ${sourceLanguage.label} — this is the language spoken in the user's surroundings.
+- User's language: ${targetLanguage.label} — this is the language the user understands and wants to hear.`;
 }
+
+/* ─── Config Builder ─── */
 
 function buildConfig(
   promptContext: PromptContext,
   voiceName: string,
-  searchEnabled: boolean,
-  riskGuardEnabled: boolean,
 ): LiveConnectConfig {
-  const isAutoMode = promptContext.mode === "AUTO";
+  const presets = MODE_PRESETS[promptContext.mode];
   const tools: Tool[] = [];
 
-  if ((promptContext.mode === "GUIDE" || promptContext.mode === "SHIELD" || isAutoMode) && searchEnabled) {
+  if (presets.search) {
     tools.push({ googleSearch: {} });
   }
 
-  const fnDeclarations: FunctionDeclaration[] = [];
-  if (riskGuardEnabled) {
-    fnDeclarations.push(RISK_FUNCTION_DECLARATION);
-  }
-  if (promptContext.mode === "SHIELD" || isAutoMode) {
-    fnDeclarations.push(SUGGESTION_FUNCTION_DECLARATION);
-  }
-  if (promptContext.mode === "SPOT" || isAutoMode) {
+  const fnDeclarations: FunctionDeclaration[] = [RISK_FUNCTION_DECLARATION];
+
+  if (promptContext.mode === "SPOT") {
     fnDeclarations.push(FORMATTED_CONTENT_DECLARATION);
   }
-  if (isAutoMode) {
-    fnDeclarations.push({
-      name: MODE_SIGNAL_FUNCTION_NAME,
-      description: "Report which behavior profile you are currently using so the UI can display it.",
-      parameters: {
-        type: Type.OBJECT,
-        properties: {
-          behavior: {
-            type: Type.STRING,
-            enum: ["SPOT", "ECHO", "GUIDE", "BRIDGE", "SHIELD"],
-            description: "The behavior profile currently active.",
-          },
-          reason: {
-            type: Type.STRING,
-            description: "Short reason for choosing this behavior.",
-          },
-        },
-        required: ["behavior", "reason"],
-      },
-    });
-  }
-  if (fnDeclarations.length) {
-    tools.push({ functionDeclarations: fnDeclarations });
-  }
+
+  tools.push({ functionDeclarations: fnDeclarations });
 
   return {
     responseModalities: [Modality.AUDIO],
@@ -753,7 +564,9 @@ function buildConfig(
   };
 }
 
-function NativeConsole() {
+/* ─── Main Component ─── */
+
+function AwaazConsole() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement>(null);
   const reconnectGuardRef = useRef<string>("");
@@ -766,37 +579,26 @@ function NativeConsole() {
   const webcam = useWebcam();
   const screenCapture = useScreenCapture();
 
-  const [activeMode, setActiveMode] = useState<NativeMode | null>("SPOT");
+  const [activeMode, setActiveMode] = useState<NativeMode>("GUIDE");
   const [sourceLanguage, setSourceLanguage] =
     useState<LanguageChoice>(DEFAULT_SOURCE_LANGUAGE);
   const [targetLanguage, setTargetLanguage] =
     useState<LanguageChoice>(DEFAULT_TARGET_LANGUAGE);
-  const [activeVoice, setActiveVoice] = useState<string>(VOICES[0]);
-  const [searchEnabled, setSearchEnabled] = useState(true);
+  const [activeVoice] = useState<string>(VOICES[0]);
   const [locationEnabled, setLocationEnabled] = useState(false);
   const [userLocation, setUserLocation] = useState<UserLocation>(null);
   const [locationLoading, setLocationLoading] = useState(false);
-  const [selectedSceneId, setSelectedSceneId] = useState<string>(DEMO_SCENES[0].id);
-  const [sceneContext, setSceneContext] = useState<string>(DEMO_SCENES[0].scriptHint);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [micEnabled, setMicEnabled] = useState(false);
   const [visionEnabled, setVisionEnabled] = useState(false);
-  const [visualSource, setVisualSource] = useState<"camera" | "screen">("camera");
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
 
-  const [riskGuardEnabled, setRiskGuardEnabled] = useState(true);
   const [currentRisk, setCurrentRisk] = useState<RiskSignal | null>(null);
-  const [riskHistory, setRiskHistory] = useState<RiskSignal[]>([]);
-  const [suggestions, setSuggestions] = useState<SmartSuggestion[]>([]);
   const [formattedContents, setFormattedContents] = useState<FormattedContent[]>([]);
-  const [autoDetectedBehavior, setAutoDetectedBehavior] = useState<string | null>(null);
-  const [autoDetectedReason, setAutoDetectedReason] = useState<string | null>(null);
 
   const [inputDraft, setInputDraft] = useState("");
   const [lastInputTranscript, setLastInputTranscript] = useState("");
   const [lastOutputTranscript, setLastOutputTranscript] = useState("");
-  const [entries, setEntries] = useState<TranscriptEntry[]>([]);
 
   const [sessionHealth, setSessionHealth] = useState<SessionHealth>({
     permissions: { mic: "unknown", vision: "unknown" },
@@ -810,12 +612,8 @@ function NativeConsole() {
   const { client, connected, connect, disconnect, volume, setConfig, setModel } =
     useLiveAPIContext();
 
-  const activeScene = useMemo(
-    () => DEMO_SCENES.find((scene) => scene.id === selectedSceneId) || null,
-    [selectedSceneId],
-  );
+  /* ─── Location fetch ─── */
 
-  // Fetch location when toggle is turned on
   useEffect(() => {
     if (!locationEnabled) {
       setUserLocation(null);
@@ -837,14 +635,13 @@ function NativeConsole() {
 
         const { latitude, longitude } = pos.coords;
 
-        // Reverse geocode with OpenStreetMap Nominatim (free, no key needed)
         let city = "Unknown";
         let area = "";
         let state = "";
         try {
           const res = await fetch(
             `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&accept-language=en`,
-            { headers: { "User-Agent": "native-app/1.0" } },
+            { headers: { "User-Agent": "awaaz-app/1.0" } },
           );
           if (res.ok) {
             const data = await res.json();
@@ -879,7 +676,7 @@ function NativeConsole() {
           });
           setLocationLoading(false);
         }
-      } catch (error) {
+      } catch {
         if (!cancelled) {
           setLocationLoading(false);
           setLocationEnabled(false);
@@ -890,7 +687,6 @@ function NativeConsole() {
 
     void fetchLocation();
 
-    // Refresh location every 5 minutes while enabled
     const intervalId = window.setInterval(() => void fetchLocation(), 300000);
     return () => {
       cancelled = true;
@@ -898,35 +694,26 @@ function NativeConsole() {
     };
   }, [locationEnabled]);
 
+  /* ─── Prompt context & config ─── */
+
   const promptContext = useMemo<PromptContext>(
     () => ({
       mode: activeMode,
       sourceLanguage,
       targetLanguage,
-      safetyProfile: SAFETY_PROFILE,
-      sceneContext,
-      riskPolicy: RISK_POLICY,
-      proactivityPolicy: PROACTIVITY_POLICY,
       userLocation: locationEnabled ? userLocation : null,
     }),
-    [activeMode, sourceLanguage, targetLanguage, sceneContext, locationEnabled, userLocation],
+    [activeMode, sourceLanguage, targetLanguage, locationEnabled, userLocation],
   );
 
   const sessionConfig = useMemo(
-    () => buildConfig(promptContext, activeVoice, searchEnabled, riskGuardEnabled),
-    [promptContext, activeVoice, searchEnabled, riskGuardEnabled],
+    () => buildConfig(promptContext, activeVoice),
+    [promptContext, activeVoice],
   );
 
   const sessionSignature = useMemo(() => JSON.stringify(sessionConfig), [sessionConfig]);
 
-  const riskGuardState = useMemo<RiskGuardState>(
-    () => ({
-      enabled: riskGuardEnabled,
-      currentRisk,
-      history: riskHistory,
-    }),
-    [riskGuardEnabled, currentRisk, riskHistory],
-  );
+  /* ─── Helpers ─── */
 
   const setLastError = useCallback((message: string | null) => {
     setSessionHealth((previous) => ({
@@ -980,10 +767,6 @@ function NativeConsole() {
 
   const applyRiskSignal = useCallback(
     (signal: RiskSignal) => {
-      if (!riskGuardEnabled) {
-        return false;
-      }
-
       if (!RISK_POLICY.enabledTypes.includes(signal.type)) {
         return false;
       }
@@ -1007,17 +790,13 @@ function NativeConsole() {
       riskCooldownByType.current[signal.type] = now;
 
       setCurrentRisk((previous) => (shouldReplaceRisk(previous, signal) ? signal : previous));
-      setRiskHistory((previous) => [signal, ...previous].slice(0, 24));
       return true;
     },
-    [riskGuardEnabled, shouldReplaceRisk],
+    [shouldReplaceRisk],
   );
 
   const maybeApplyHeuristicRisk = useCallback(
     (transcript: string) => {
-      if (!riskGuardEnabled) {
-        return;
-      }
       const heuristicSignal = detectHeuristicRisk(
         transcript,
         sourceLanguage,
@@ -1028,8 +807,10 @@ function NativeConsole() {
       }
       void applyRiskSignal(heuristicSignal);
     },
-    [applyRiskSignal, riskGuardEnabled, sourceLanguage, targetLanguage],
+    [applyRiskSignal, sourceLanguage, targetLanguage],
   );
+
+  /* ─── Session setup ─── */
 
   useEffect(() => {
     setModel(MODEL_NAME);
@@ -1086,6 +867,8 @@ function NativeConsole() {
     };
   }, [setPermission]);
 
+  /* ─── Auto-reconnect on config change ─── */
+
   useEffect(() => {
     if (!reconnectGuardRef.current) {
       reconnectGuardRef.current = sessionSignature;
@@ -1125,11 +908,15 @@ function NativeConsole() {
     };
   }, [sessionSignature, connected, connect, disconnect, setLastError, setReconnecting]);
 
+  /* ─── Video stream binding ─── */
+
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.srcObject = activeStream;
     }
   }, [activeStream]);
+
+  /* ─── Mic + Vision controls ─── */
 
   const enableMic = useCallback(async () => {
     if (sessionHealth.permissions.mic === "granted") {
@@ -1163,6 +950,8 @@ function NativeConsole() {
       return false;
     }
   }, [sessionHealth.permissions.mic, setLastError, setPermission]);
+
+  /* ─── Audio recorder streaming ─── */
 
   useEffect(() => {
     let cancelled = false;
@@ -1206,17 +995,14 @@ function NativeConsole() {
     };
   }, [audioRecorder, client, connected, micEnabled, setLastError, setPermission]);
 
+  /* ─── Vision stream ─── */
+
   const startVisionStream = useCallback(
-    async (source: "camera" | "screen") => {
-      const selected = source === "camera" ? webcam : screenCapture;
-      const alternate = source === "camera" ? screenCapture : webcam;
-
-      const stream = await selected.start();
-      alternate.stop();
-
+    async () => {
+      const stream = await webcam.start();
+      screenCapture.stop();
       setActiveStream(stream);
       setVisionEnabled(true);
-      setVisualSource(source);
       setPermission("vision", "granted");
       setLastError(null);
       return stream;
@@ -1225,20 +1011,20 @@ function NativeConsole() {
   );
 
   const turnOnVision = useCallback(
-    async (source: "camera" | "screen" = visualSource) => {
+    async () => {
       try {
-        await startVisionStream(source);
+        await startVisionStream();
         return true;
       } catch (error) {
         if (isPermissionDeniedError(error)) {
           setPermission("vision", "denied");
         }
         setVisionEnabled(false);
-        setLastError(toErrorMessage(error, "Could not start visual capture."));
+        setLastError(toErrorMessage(error, "Could not start camera."));
         return false;
       }
     },
-    [setLastError, setPermission, startVisionStream, visualSource],
+    [setLastError, setPermission, startVisionStream],
   );
 
   const turnOffVision = useCallback(() => {
@@ -1247,6 +1033,8 @@ function NativeConsole() {
     setActiveStream(null);
     setVisionEnabled(false);
   }, [screenCapture, webcam]);
+
+  /* ─── Frame capture ─── */
 
   useEffect(() => {
     let timeoutId = -1;
@@ -1291,6 +1079,8 @@ function NativeConsole() {
     };
   }, [connected, visionEnabled, activeStream, client]);
 
+  /* ─── Tool call handler ─── */
+
   useEffect(() => {
     const onToolCall = (toolCall: LiveServerToolCall) => {
       if (!toolCall.functionCalls?.length) {
@@ -1298,16 +1088,7 @@ function NativeConsole() {
       }
 
       const functionResponses = toolCall.functionCalls.map((functionCall) => {
-        // Handle risk signal
         if (functionCall.name === RISK_FUNCTION_NAME) {
-          if (!riskGuardEnabled) {
-            return {
-              id: functionCall.id,
-              name: functionCall.name,
-              response: { output: { accepted: false, reason: "Risk guard disabled." } },
-            };
-          }
-
           const parsed = parseRiskSignalFromArgs(
             functionCall.args,
             sourceLanguage,
@@ -1335,61 +1116,6 @@ function NativeConsole() {
           };
         }
 
-        // Handle suggestion
-        if (functionCall.name === SUGGESTION_FUNCTION_NAME) {
-          const args = functionCall.args || {};
-          const category = String(args.category || "").trim() as SuggestionCategory;
-          const title = String(args.title || "").trim();
-          const detail = String(args.detail || "").trim();
-          const action = String(args.action || "").trim();
-          const confidence = clampConfidence(Number(args.confidence || 0));
-
-          const validCategories: SuggestionCategory[] = ["overspend", "scam", "safety", "negotiation", "general"];
-          if (!validCategories.includes(category) || !title || !detail || !action) {
-            return {
-              id: functionCall.id,
-              name: functionCall.name,
-              response: { output: { accepted: false, reason: "Malformed suggestion payload." } },
-            };
-          }
-
-          const suggestion: SmartSuggestion = {
-            id: `sug-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            category,
-            title,
-            detail,
-            action,
-            confidence,
-            timestamp: new Date().toISOString(),
-            source: "model",
-          };
-
-          setSuggestions((prev) => [suggestion, ...prev].slice(0, 20));
-          return {
-            id: functionCall.id,
-            name: functionCall.name,
-            response: { output: { accepted: true, reason: "Suggestion recorded." } },
-          };
-        }
-
-        // Handle mode signal (Auto mode)
-        if (functionCall.name === MODE_SIGNAL_FUNCTION_NAME) {
-          const args = functionCall.args || {};
-          const behavior = String(args.behavior || "").trim();
-          const reason = String(args.reason || "").trim();
-          const validBehaviors = ["SPOT", "ECHO", "GUIDE", "BRIDGE", "SHIELD"];
-          if (validBehaviors.includes(behavior)) {
-            setAutoDetectedBehavior(behavior);
-            setAutoDetectedReason(reason);
-          }
-          return {
-            id: functionCall.id,
-            name: functionCall.name,
-            response: { output: { accepted: true, reason: "Mode signal received." } },
-          };
-        }
-
-        // Handle formatted content (Spot mode)
         if (functionCall.name === FORMATTED_CONTENT_FUNCTION_NAME) {
           const args = functionCall.args || {};
           const contentType = String(args.contentType || "general").trim() as FormattedContentType;
@@ -1423,7 +1149,6 @@ function NativeConsole() {
           };
         }
 
-        // Unknown function
         return {
           id: functionCall.id,
           name: functionCall.name,
@@ -1443,10 +1168,11 @@ function NativeConsole() {
   }, [
     applyRiskSignal,
     client,
-    riskGuardEnabled,
     sourceLanguage,
     targetLanguage,
   ]);
+
+  /* ─── Content handler ─── */
 
   useEffect(() => {
     const onContent = (content: LiveServerContent) => {
@@ -1467,14 +1193,6 @@ function NativeConsole() {
           .trim() || "";
 
       if (text) {
-        setEntries((previous) => [
-          {
-            id: `${Date.now()}-${Math.random()}`,
-            speaker: "native" as const,
-            text,
-          },
-          ...previous,
-        ].slice(0, 24));
         maybeApplyHeuristicRisk(text);
       }
     };
@@ -1485,6 +1203,33 @@ function NativeConsole() {
     };
   }, [client, maybeApplyHeuristicRisk]);
 
+  /* ─── Mode switching with preset inputs ─── */
+
+  const switchMode = useCallback(
+    async (mode: NativeMode) => {
+      setActiveMode(mode);
+      setLastError(null);
+      setFormattedContents([]);
+
+      const presets = MODE_PRESETS[mode];
+
+      // Always enable mic
+      if (presets.mic && !micEnabled) {
+        await enableMic();
+      }
+
+      // Camera control
+      if (presets.camera && !visionEnabled) {
+        await turnOnVision();
+      } else if (!presets.camera && visionEnabled) {
+        turnOffVision();
+      }
+    },
+    [enableMic, micEnabled, turnOffVision, turnOnVision, visionEnabled, setLastError],
+  );
+
+  /* ─── Connection ─── */
+
   const toggleConnection = useCallback(async () => {
     setLastError(null);
     setReconnecting(true);
@@ -1493,6 +1238,15 @@ function NativeConsole() {
       if (connected) {
         await disconnect();
       } else {
+        // Enable mic before connecting
+        if (!micEnabled) {
+          await enableMic();
+        }
+        // Enable camera if mode requires it
+        const presets = MODE_PRESETS[activeMode];
+        if (presets.camera && !visionEnabled) {
+          await turnOnVision();
+        }
         await connect();
       }
     } catch (error) {
@@ -1500,7 +1254,7 @@ function NativeConsole() {
     } finally {
       setReconnecting(false);
     }
-  }, [connected, connect, disconnect, setLastError, setReconnecting]);
+  }, [connected, connect, disconnect, setLastError, setReconnecting, enableMic, micEnabled, activeMode, turnOnVision, visionEnabled]);
 
   const retrySession = useCallback(async () => {
     setLastError(null);
@@ -1518,69 +1272,6 @@ function NativeConsole() {
     }
   }, [connected, connect, disconnect, setLastError, setReconnecting]);
 
-  const onMicToggle = useCallback(async () => {
-    if (micEnabled) {
-      setMicEnabled(false);
-      return;
-    }
-    await enableMic();
-  }, [enableMic, micEnabled]);
-
-  const onVisualToggle = useCallback(async () => {
-    if (visionEnabled) {
-      turnOffVision();
-      return;
-    }
-    await turnOnVision(visualSource);
-  }, [turnOffVision, turnOnVision, visionEnabled, visualSource]);
-
-  const onVisualSourceChange = useCallback(
-    async (source: "camera" | "screen") => {
-      setVisualSource(source);
-      if (!visionEnabled) {
-        return;
-      }
-      await turnOnVision(source);
-    },
-    [turnOnVision, visionEnabled],
-  );
-
-  const applyScenePreset = useCallback(
-    async (sceneId: string): Promise<void> => {
-      const scene = DEMO_SCENES.find((item) => item.id === sceneId);
-      if (!scene) {
-        return;
-      }
-
-      setSelectedSceneId(scene.id);
-      setSceneContext(scene.scriptHint);
-      setActiveMode(scene.mode);
-      setSourceLanguage((current) => getLanguage(scene.sourceLanguage, current));
-      setTargetLanguage((current) => getLanguage(scene.targetLanguage, current));
-      setSearchEnabled(scene.requiresSearch);
-      setLastError(null);
-
-      if (!micEnabled) {
-        await enableMic();
-      }
-
-      if (scene.requiresVision) {
-        setVisualSource("camera");
-        await turnOnVision("camera");
-      } else if (visionEnabled) {
-        turnOffVision();
-      }
-    },
-    [
-      enableMic,
-      micEnabled,
-      setLastError,
-      turnOffVision,
-      turnOnVision,
-      visionEnabled,
-    ],
-  );
-
   const submitTextPrompt = useCallback(
     (event: FormEvent) => {
       event.preventDefault();
@@ -1590,167 +1281,95 @@ function NativeConsole() {
       }
 
       client.send([{ text: trimmed }]);
-      setEntries((previous) => [
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          speaker: "you" as const,
-          text: trimmed,
-        },
-        ...previous,
-      ].slice(0, 24));
       setInputDraft("");
     },
     [client, connected, inputDraft],
   );
 
-  const liveStatuses = [
-    { label: "Listening", active: connected && micEnabled },
-    { label: "Seeing", active: connected && visionEnabled },
-    {
-      label: "Searching",
-      active: connected && (activeMode === "GUIDE" || activeMode === "SHIELD" || activeMode === "AUTO") && searchEnabled,
-    },
-    { label: "Speaking", active: connected && volume > 0.05 },
-    { label: "Guarding", active: connected && (activeMode === "SHIELD" || activeMode === "AUTO") },
-    ...(activeMode === "AUTO" && autoDetectedBehavior
-      ? [{ label: `Behavior: ${autoDetectedBehavior}`, active: true }]
-      : []),
-  ];
+  /* ─── Derived state ─── */
+
+  const showCamera = activeMode === "SPOT";
+
+  /* ─── Render ─── */
 
   return (
-    <div className="native-app">
+    <div className="awaaz-app">
       <canvas ref={frameCanvasRef} className="hidden-canvas" />
 
-      <header className="top-rail">
-        <div className="brand-block">
-          <p className="eyebrow">Local Risk Guard</p>
-          <h1>native</h1>
-          <p className="tagline">Become local, stay safe, act with confidence.</p>
-        </div>
-
-        <div className="rail-controls">
-          <div className="chip-group mode-chip-group">
-            {(Object.keys(MODE_DETAILS) as NativeMode[]).map((mode) => (
-              <button
-                key={mode}
-                className={cn("rail-chip", { active: activeMode === mode })}
-                onClick={() =>
-                  setActiveMode((current) => (current === mode ? null : mode))
-                }
-              >
-                {MODE_DETAILS[mode].title}
-              </button>
-            ))}
-          </div>
-
-          <div className="scene-row">
-            <label htmlFor="scene-select">Scene</label>
-            <select
-              id="scene-select"
-              value={selectedSceneId}
-              onChange={(event) => void applyScenePreset(event.target.value)}
-            >
-              {DEMO_SCENES.map((scene) => (
-                <option key={scene.id} value={scene.id}>
-                  {scene.label}
-                </option>
-              ))}
-            </select>
-            <span className="scene-hint-inline">{activeScene?.scriptHint}</span>
-          </div>
-
-          <div className="pair-row">
-            <label htmlFor="source-language">Local</label>
-            <select
-              id="source-language"
-              value={sourceLanguage.id}
-              onChange={(event) =>
-                setSourceLanguage(getLanguage(event.target.value, sourceLanguage))
-              }
-            >
-              {LANGUAGES.map((language) => (
-                <option key={language.id} value={language.id}>
-                  {language.label}
-                </option>
-              ))}
-            </select>
-
-            <label htmlFor="target-language">Home</label>
-            <select
-              id="target-language"
-              value={targetLanguage.id}
-              onChange={(event) =>
-                setTargetLanguage(getLanguage(event.target.value, targetLanguage))
-              }
-            >
-              {LANGUAGES.map((language) => (
-                <option key={language.id} value={language.id}>
-                  {language.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div className="rail-actions">
-          <button
-            className={cn("session-toggle", {
-              connected,
-              disabled: sessionHealth.reconnecting,
-            })}
-            onClick={() => void toggleConnection()}
-            disabled={sessionHealth.reconnecting}
-          >
-            {sessionHealth.reconnecting
-              ? "Reconnecting..."
-              : connected
-                ? "Pause"
-                : "Start"}
-          </button>
-
-          <button
-            className={cn("risk-toggle", { active: riskGuardState.enabled })}
-            onClick={() => setRiskGuardEnabled((value) => !value)}
-          >
-            Risk Guard {riskGuardState.enabled ? "On" : "Off"}
-          </button>
-
-          <button
-            className={cn("risk-toggle", { active: locationEnabled })}
-            onClick={() => setLocationEnabled((value) => !value)}
-            disabled={locationLoading}
-          >
-            📍 Location {locationLoading ? "..." : locationEnabled ? "On" : "Off"}
-          </button>
-          {locationEnabled && userLocation && (
-            <span className="location-status">
-              {userLocation.area ? `${userLocation.area}, ` : ""}{userLocation.city}
-            </span>
-          )}
-        </div>
+      {/* ─── Header ─── */}
+      <header className="top-bar">
+        <h1 className="brand">awaaz</h1>
+        <button
+          className={cn("gps-toggle", { active: locationEnabled })}
+          onClick={() => setLocationEnabled((v) => !v)}
+          disabled={locationLoading}
+        >
+          📍{" "}
+          {locationLoading
+            ? "..."
+            : locationEnabled && userLocation
+              ? `${userLocation.area ? `${userLocation.area}, ` : ""}${userLocation.city}`
+              : "Location"}
+        </button>
       </header>
 
-      <main className="command-main">
-        <section className="vision-panel">
-          <div className="panel-head">
-            <strong>Live View</strong>
-            <div className="source-switch">
-              <button
-                className={cn({ active: visualSource === "camera" })}
-                onClick={() => void onVisualSourceChange("camera")}
-              >
-                Camera
-              </button>
-              <button
-                className={cn({ active: visualSource === "screen" })}
-                onClick={() => void onVisualSourceChange("screen")}
-              >
-                Screen
-              </button>
-            </div>
-          </div>
+      {/* ─── Mode selector ─── */}
+      <nav className="mode-selector">
+        {(Object.keys(MODE_DETAILS) as NativeMode[]).map((mode) => (
+          <button
+            key={mode}
+            className={cn("mode-pill", { active: activeMode === mode })}
+            onClick={() => void switchMode(mode)}
+          >
+            <span className="mode-icon">{MODE_DETAILS[mode].icon}</span>
+            <span className="mode-title">{MODE_DETAILS[mode].title}</span>
+          </button>
+        ))}
+      </nav>
 
-          <div className="video-wrap">
+      <p className="mode-blurb">{MODE_DETAILS[activeMode].blurb}</p>
+
+      {/* ─── Language pair ─── */}
+      <div className="lang-pair">
+        <div className="lang-picker">
+          <label htmlFor="source-lang">Local</label>
+          <select
+            id="source-lang"
+            value={sourceLanguage.id}
+            onChange={(e) =>
+              setSourceLanguage(getLanguage(e.target.value, sourceLanguage))
+            }
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.display} ({l.label})
+              </option>
+            ))}
+          </select>
+        </div>
+        <span className="lang-arrow">→</span>
+        <div className="lang-picker">
+          <label htmlFor="target-lang">You</label>
+          <select
+            id="target-lang"
+            value={targetLanguage.id}
+            onChange={(e) =>
+              setTargetLanguage(getLanguage(e.target.value, targetLanguage))
+            }
+          >
+            {LANGUAGES.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.display} ({l.label})
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      {/* ─── Main area ─── */}
+      <main className="main-area">
+        {showCamera ? (
+          <div className="camera-feed">
             <video
               ref={videoRef}
               autoPlay
@@ -1758,308 +1377,135 @@ function NativeConsole() {
               className={cn("stream", { hidden: !activeStream })}
             />
             {!activeStream && (
-              <div className="empty-state">
-                <p>Visual input is off</p>
-                <span>Enable Camera or Screen for Spot, Guide, and Shield modes.</span>
+              <div className="camera-placeholder">
+                <p>📷</p>
+                <span>Camera will activate when you connect</span>
               </div>
             )}
           </div>
-
-          <div className="control-strip">
-            <button
-              className={cn("control-chip", { active: micEnabled })}
-              onClick={() => void onMicToggle()}
-            >
-              Mic {micEnabled ? "On" : "Off"}
-            </button>
-            <button
-              className={cn("control-chip", { active: visionEnabled })}
-              onClick={() => void onVisualToggle()}
-            >
-              Vision {visionEnabled ? "On" : "Off"}
-            </button>
-            <button
-              className={cn("control-chip", {
-                active: searchEnabled,
-                disabled: activeMode !== "GUIDE" && activeMode !== "SHIELD" && activeMode !== "AUTO",
-              })}
-              onClick={() => setSearchEnabled((value) => !value)}
-              disabled={activeMode !== "GUIDE" && activeMode !== "SHIELD" && activeMode !== "AUTO"}
-            >
-              Search {searchEnabled ? "On" : "Off"}
-            </button>
+        ) : (
+          <div className={cn("audio-viz", { pulsing: connected && volume > 0.02 })}>
+            <div className="viz-ring" />
+            <div className="viz-ring ring-2" />
+            <div className="viz-ring ring-3" />
+            <span className="viz-label">
+              {connected
+                ? activeMode === "BRIDGE"
+                  ? "Listening to surroundings..."
+                  : "Listening..."
+                : "Tap Start to begin"}
+            </span>
           </div>
-        </section>
-
-        <section className="risk-panel">
-          <div className="panel-head">
-            <strong>Local Risk Guard</strong>
-            <span className="mode-tag">{activeMode || "Standby"}</span>
-          </div>
-
-          <div
-            className={cn("risk-banner", {
-              low: riskGuardState.currentRisk?.level === "low",
-              medium: riskGuardState.currentRisk?.level === "medium",
-              high: riskGuardState.currentRisk?.level === "high",
-              neutral: !riskGuardState.currentRisk,
-            })}
-          >
-            {!riskGuardState.currentRisk ? (
-              <>
-                <p className="risk-level">No active risk signal</p>
-                <p className="risk-line">Listening for price, misinformation, and urgency cues.</p>
-              </>
-            ) : (
-              <>
-                <p className="risk-level">
-                  {riskGuardState.currentRisk.level.toUpperCase()} {" "}
-                  {riskGuardState.currentRisk.type}
-                </p>
-                <p className="risk-cue">"{riskGuardState.currentRisk.cue}"</p>
-                <p className="risk-line">Why: {riskGuardState.currentRisk.reason}</p>
-                <p className="risk-line strong">What next: {riskGuardState.currentRisk.action}</p>
-                {riskGuardState.currentRisk.baselineReference && (
-                  <p className="risk-line">
-                    Baseline: {riskGuardState.currentRisk.baselineReference}
-                  </p>
-                )}
-              </>
-            )}
-          </div>
-
-          <div className="status-grid">
-            {liveStatuses.map((status) => (
-              <div
-                key={status.label}
-                className={cn("status-chip", { active: status.active })}
-              >
-                {status.label}
-              </div>
-            ))}
-          </div>
-
-          <div className="risk-mini-history">
-            <p>Recent signals</p>
-            {riskGuardState.history.length === 0 ? (
-              <span className="history-empty">No signals yet.</span>
-            ) : (
-              <ul>
-                {riskGuardState.history.slice(0, 4).map((risk) => (
-                  <li key={risk.id}>
-                    <strong>{risk.level}</strong> {risk.type}: {risk.action}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        </section>
-
-        {(activeMode === "SHIELD" || activeMode === "AUTO") && (
-          <section className="suggestion-panel">
-            <div className="panel-head">
-              <strong>🛡️ Smart Guardian</strong>
-              <span className="suggestion-count">
-                {suggestions.length} suggestion{suggestions.length !== 1 ? "s" : ""}
-              </span>
-            </div>
-
-            {suggestions.length === 0 ? (
-              <div className="suggestion-empty">
-                <p className="suggestion-empty-title">Guardian is watching</p>
-                <p className="suggestion-empty-hint">
-                  Enable mic and camera, then connect. Shield will analyse your
-                  surroundings and suggest ways to save money, avoid scams, and
-                  stay safe.
-                </p>
-              </div>
-            ) : (
-              <div className="suggestion-list">
-                {suggestions.slice(0, 8).map((sug) => (
-                  <div
-                    key={sug.id}
-                    className={cn("suggestion-card", sug.category)}
-                  >
-                    <div className="suggestion-card-head">
-                      <span className="suggestion-category-badge">
-                        {sug.category === "overspend" && "💰"}
-                        {sug.category === "scam" && "🚨"}
-                        {sug.category === "safety" && "⚠️"}
-                        {sug.category === "negotiation" && "🤝"}
-                        {sug.category === "general" && "💡"}
-                        {" "}{sug.category}
-                      </span>
-                      <span className="suggestion-confidence">
-                        {Math.round(sug.confidence * 100)}%
-                      </span>
-                    </div>
-                    <p className="suggestion-title">{sug.title}</p>
-                    <p className="suggestion-detail">{sug.detail}</p>
-                    <p className="suggestion-action">
-                      <strong>→</strong> {sug.action}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {suggestions.length > 0 && (
-              <button
-                className="suggestion-clear"
-                onClick={() => setSuggestions([])}
-              >
-                Clear all suggestions
-              </button>
-            )}
-          </section>
-        )}
-
-        {/* Formatted Content Panel (Spot / Auto mode) */}
-        {(activeMode === "SPOT" || activeMode === "AUTO") && (
-          <section className="formatted-content-panel">
-            <div className="panel-head">
-              <strong>📄 Visual Content</strong>
-              <span className="suggestion-count">
-                {formattedContents.length} item{formattedContents.length !== 1 ? "s" : ""}
-              </span>
-            </div>
-
-            {formattedContents.length === 0 ? (
-              <div className="suggestion-empty">
-                <p className="suggestion-empty-title">Point camera at text</p>
-                <p className="suggestion-empty-hint">
-                  When Spot sees menus, documents, forms, signs, or tables, it will
-                  speak a summary and show a detailed breakdown here.
-                </p>
-              </div>
-            ) : (
-              <div className="formatted-content-list">
-                {formattedContents.map((fc) => (
-                  <div key={fc.id} className="formatted-content-card">
-                    <div className="fc-card-head">
-                      <span className="fc-type-badge">
-                        {fc.contentType === "menu" && "🍽️"}
-                        {fc.contentType === "document" && "📃"}
-                        {fc.contentType === "form" && "📝"}
-                        {fc.contentType === "sign" && "🪧"}
-                        {fc.contentType === "table" && "📊"}
-                        {fc.contentType === "general" && "📄"}
-                        {" "}{fc.contentType}
-                      </span>
-                      <span className="fc-time">
-                        {new Date(fc.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <p className="fc-title">{fc.title}</p>
-                    <div className="fc-markdown">
-                      <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", margin: 0 }}>
-                        {fc.markdown}
-                      </pre>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {formattedContents.length > 0 && (
-              <button
-                className="suggestion-clear"
-                onClick={() => setFormattedContents([])}
-              >
-                Clear all content
-              </button>
-            )}
-          </section>
         )}
       </main>
 
-      <section className="live-strip">
-        <div className="live-cell">
+      {/* ─── Risk toast ─── */}
+      {currentRisk && (
+        <div
+          className={cn("risk-toast", currentRisk.level)}
+          onClick={() => setCurrentRisk(null)}
+        >
+          <span className="risk-badge">
+            {currentRisk.level === "high" ? "🚨" : currentRisk.level === "medium" ? "⚠️" : "💡"}{" "}
+            {currentRisk.level.toUpperCase()} {currentRisk.type}
+          </span>
+          <p className="risk-cue">"{currentRisk.cue}"</p>
+          <p className="risk-reason">{currentRisk.reason}</p>
+          <p className="risk-action"><strong>→</strong> {currentRisk.action}</p>
+        </div>
+      )}
+
+      {/* ─── Formatted content panel (SPOT mode) ─── */}
+      {activeMode === "SPOT" && formattedContents.length > 0 && (
+        <section className="fc-panel">
+          <div className="fc-panel-head">
+            <strong>📄 Visual Content</strong>
+            <button
+              className="fc-clear"
+              onClick={() => setFormattedContents([])}
+            >
+              Clear
+            </button>
+          </div>
+          <div className="fc-list">
+            {formattedContents.map((fc) => (
+              <div key={fc.id} className="fc-card">
+                <div className="fc-card-head">
+                  <span className="fc-type-badge">
+                    {fc.contentType === "menu" && "🍽️"}
+                    {fc.contentType === "document" && "📃"}
+                    {fc.contentType === "form" && "📝"}
+                    {fc.contentType === "sign" && "🪧"}
+                    {fc.contentType === "table" && "📊"}
+                    {fc.contentType === "general" && "📄"}
+                    {" "}{fc.contentType}
+                  </span>
+                  <span className="fc-time">
+                    {new Date(fc.timestamp).toLocaleTimeString()}
+                  </span>
+                </div>
+                <p className="fc-title">{fc.title}</p>
+                <div className="fc-markdown">
+                  <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", margin: 0 }}>
+                    {fc.markdown}
+                  </pre>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* ─── Transcript strip ─── */}
+      <section className="transcript-strip">
+        <div className="transcript-cell">
           <span>You hear</span>
           <p>{lastInputTranscript || "..."}</p>
         </div>
-        <div className="live-cell">
-          <span>native says</span>
+        <div className="transcript-cell">
+          <span>Awaaz says</span>
           <p>{lastOutputTranscript || "..."}</p>
         </div>
       </section>
 
-      <details
-        className="advanced-drawer"
-        open={advancedOpen}
-        onToggle={(event) =>
-          setAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)
-        }
+      {/* ─── Quick ask (visible when connected) ─── */}
+      {connected && (
+        <form onSubmit={submitTextPrompt} className="quick-ask">
+          <input
+            value={inputDraft}
+            onChange={(e) => setInputDraft(e.target.value)}
+            placeholder="Type a question..."
+            disabled={!connected}
+          />
+          <button type="submit" disabled={!connected || !inputDraft.trim()}>
+            Send
+          </button>
+        </form>
+      )}
+
+      {/* ─── Connect FAB ─── */}
+      <button
+        className={cn("connect-fab", {
+          connected,
+          disabled: sessionHealth.reconnecting,
+        })}
+        onClick={() => void toggleConnection()}
+        disabled={sessionHealth.reconnecting}
       >
-        <summary>Advanced controls and history</summary>
-        <div className="advanced-content">
-          <div className="advanced-row">
-            <label htmlFor="voice-select">Voice</label>
-            <select
-              id="voice-select"
-              value={activeVoice}
-              onChange={(event) => setActiveVoice(event.target.value)}
-            >
-              {VOICES.map((voice) => (
-                <option key={voice} value={voice}>
-                  {voice}
-                </option>
-              ))}
-            </select>
-          </div>
+        {sessionHealth.reconnecting
+          ? "..."
+          : connected
+            ? "⏸ Pause"
+            : "▶ Start"}
+      </button>
 
-          <div className="permission-row">
-            <div
-              className={cn("permission-chip", {
-                active: sessionHealth.permissions.mic === "granted",
-                blocked: sessionHealth.permissions.mic === "denied",
-              })}
-            >
-              Mic permission: {sessionHealth.permissions.mic}
-            </div>
-            <div
-              className={cn("permission-chip", {
-                active: sessionHealth.permissions.vision === "granted",
-                blocked: sessionHealth.permissions.vision === "denied",
-              })}
-            >
-              Vision permission: {sessionHealth.permissions.vision}
-            </div>
-          </div>
-
-          {(sessionHealth.lastError || sessionHealth.reconnecting) && (
-            <div className="session-alert">
-              <p>{sessionHealth.lastError || "Reconnecting live session..."}</p>
-              <button onClick={() => void retrySession()}>Retry Session</button>
-            </div>
-          )}
-
-          <div className="entries">
-            {entries.length === 0 && <p className="empty-log">No messages yet.</p>}
-            {entries.map((entry) => (
-              <div key={entry.id} className={cn("entry", entry.speaker)}>
-                <span>{entry.speaker === "you" ? "You" : "native"}</span>
-                <p>{entry.text}</p>
-              </div>
-            ))}
-          </div>
-
-          <form onSubmit={submitTextPrompt} className="quick-ask">
-            <input
-              value={inputDraft}
-              onChange={(event) => setInputDraft(event.target.value)}
-              placeholder="Type a quick question or instruction"
-              disabled={!connected}
-            />
-            <button type="submit" disabled={!connected || !inputDraft.trim()}>
-              Send
-            </button>
-          </form>
-
-          {/* Blind mode hooks intentionally not rendered in production path. */}
-          {FEATURE_FLAGS.blindMode ? null : null}
+      {/* ─── Error banner ─── */}
+      {(sessionHealth.lastError || sessionHealth.reconnecting) && (
+        <div className="error-banner">
+          <p>{sessionHealth.lastError || "Reconnecting..."}</p>
+          <button onClick={() => void retrySession()}>Retry</button>
         </div>
-      </details>
+      )}
     </div>
   );
 }
@@ -2067,7 +1513,7 @@ function NativeConsole() {
 function App() {
   return (
     <LiveAPIProvider options={apiOptions}>
-      <NativeConsole />
+      <AwaazConsole />
     </LiveAPIProvider>
   );
 }

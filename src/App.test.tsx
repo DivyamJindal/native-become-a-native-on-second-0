@@ -1,8 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import App from "./App";
 
-test("renders native heading", () => {
+test("renders awaaz heading", () => {
   render(<App />);
-  const heading = screen.getByRole("heading", { name: /native/i });
+  const heading = screen.getByRole("heading", { name: /awaaz/i });
   expect(heading).toBeInTheDocument();
 });
