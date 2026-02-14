@@ -6,7 +6,15 @@ import {
   useRef,
   useState,
 } from "react";
-import { LiveConnectConfig, LiveServerContent, Modality, Tool } from "@google/genai";
+import {
+  FunctionDeclaration,
+  LiveConnectConfig,
+  LiveServerContent,
+  LiveServerToolCall,
+  Modality,
+  Tool,
+  Type,
+} from "@google/genai";
 import cn from "classnames";
 import "./App.scss";
 import { LiveAPIProvider, useLiveAPIContext } from "./contexts/LiveAPIContext";
@@ -28,8 +36,12 @@ const MODEL_NAME =
   process.env.REACT_APP_GEMINI_MODEL ||
   "models/gemini-2.5-flash-native-audio-preview-12-2025";
 
+const RISK_FUNCTION_NAME = "emit_risk_signal";
+
 type NativeMode = "SPOT" | "ECHO" | "GUIDE" | "BRIDGE";
 type PermissionFlag = "unknown" | "granted" | "denied" | "prompt";
+type RiskType = "price" | "misinformation" | "urgency";
+type RiskLevel = "low" | "medium" | "high";
 
 type LanguageChoice = {
   id: string;
@@ -69,12 +81,121 @@ type SessionHealth = {
   lastError: string | null;
 };
 
+type RiskPolicy = {
+  enabledTypes: RiskType[];
+  minConfidenceForMedium: number;
+  minConfidenceForHigh: number;
+  cooldownMs: number;
+  useSearchForPriceBaseline: boolean;
+};
+
+type ProactivityPolicy = {
+  style: "contextual-assist";
+  speakOnlyOnHighConfidenceRisk: boolean;
+  avoidNarrationSpam: boolean;
+};
+
 type PromptContext = {
   mode: NativeMode | null;
   sourceLanguage: LanguageChoice;
   targetLanguage: LanguageChoice;
   safetyProfile: SafetyProfile;
   sceneContext: string;
+  riskPolicy: RiskPolicy;
+  proactivityPolicy: ProactivityPolicy;
+};
+
+type RiskSignal = {
+  id: string;
+  type: RiskType;
+  level: RiskLevel;
+  cue: string;
+  reason: string;
+  action: string;
+  confidence: number;
+  sourceLanguage: string;
+  targetLanguage: string;
+  timestamp: string;
+  baselineReference?: string;
+  source: "model" | "heuristic";
+};
+
+type RiskGuardState = {
+  enabled: boolean;
+  currentRisk: RiskSignal | null;
+  history: RiskSignal[];
+};
+
+// Architecture hooks for future Blind Mode implementation.
+export type BlindInsight = {
+  id: string;
+  summary: string;
+  confidence: number;
+  timestamp: string;
+};
+
+export type NavigationCue = {
+  direction: string;
+  hazard: string;
+  action: string;
+};
+
+export type ConversationSafetyCue = {
+  cue: string;
+  riskType: "ripoff" | "misleading" | "urgency";
+  recommendation: string;
+};
+
+const FEATURE_FLAGS = {
+  blindMode: false,
+} as const;
+
+const RISK_LEVEL_PRIORITY: Record<RiskLevel, number> = {
+  low: 1,
+  medium: 2,
+  high: 3,
+};
+
+const RISK_FUNCTION_DECLARATION: FunctionDeclaration = {
+  name: RISK_FUNCTION_NAME,
+  description:
+    "Emit a local risk guard signal when actionable risk is detected for price, misinformation, or urgency.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      type: {
+        type: Type.STRING,
+        enum: ["price", "misinformation", "urgency"],
+        description: "The risk category.",
+      },
+      level: {
+        type: Type.STRING,
+        enum: ["low", "medium", "high"],
+        description: "Risk severity level.",
+      },
+      cue: {
+        type: Type.STRING,
+        description: "Short quote or cue that triggered this risk.",
+      },
+      reason: {
+        type: Type.STRING,
+        description: "Why this is potentially risky.",
+      },
+      action: {
+        type: Type.STRING,
+        description: "Immediate next step for user.",
+      },
+      confidence: {
+        type: Type.NUMBER,
+        description: "Model confidence from 0.0 to 1.0.",
+      },
+      baselineReference: {
+        type: Type.STRING,
+        description: "Optional benchmark or grounding reference for price risk.",
+      },
+    },
+    required: ["type", "level", "cue", "reason", "action", "confidence"],
+  },
 };
 
 const LANGUAGES: LanguageChoice[] = [
@@ -100,7 +221,7 @@ const MODE_DETAILS: Record<NativeMode, { title: string; blurb: string }> = {
   },
   GUIDE: {
     title: "Guide",
-    blurb: "What you see + what you ask + live search.",
+    blurb: "What you see + what you ask + live grounding.",
   },
   BRIDGE: {
     title: "Bridge",
@@ -113,6 +234,20 @@ const SAFETY_PROFILE: SafetyProfile = {
   explainOfficialInstructionsOnly: true,
 };
 
+const RISK_POLICY: RiskPolicy = {
+  enabledTypes: ["price", "misinformation", "urgency"],
+  minConfidenceForMedium: 0.62,
+  minConfidenceForHigh: 0.78,
+  cooldownMs: 18000,
+  useSearchForPriceBaseline: true,
+};
+
+const PROACTIVITY_POLICY: ProactivityPolicy = {
+  style: "contextual-assist",
+  speakOnlyOnHighConfidenceRisk: true,
+  avoidNarrationSpam: true,
+};
+
 const DEMO_SCENES: DemoScene[] = [
   {
     id: "scene-a-guide",
@@ -123,7 +258,7 @@ const DEMO_SCENES: DemoScene[] = [
     requiresSearch: true,
     requiresVision: true,
     scriptHint:
-      "Point at a government form and ask: 'Yeh form kaise bharein? Mujhe kya chahiye?' Expect: Step 1/2/3 answer in Hindi.",
+      "Guide mode: catch misinformation risk while explaining a government form. Ask: 'Yeh form kaise bharein? Mujhe kya chahiye?'",
   },
   {
     id: "scene-b-echo",
@@ -134,7 +269,7 @@ const DEMO_SCENES: DemoScene[] = [
     requiresSearch: false,
     requiresVision: false,
     scriptHint:
-      "Play or speak a Kannada announcement. Expect translation-only Hindi output with no extra commentary.",
+      "Echo mode: extract urgency from a Kannada announcement and output clean Hindi translation with action cue.",
   },
   {
     id: "scene-c-bridge",
@@ -145,7 +280,7 @@ const DEMO_SCENES: DemoScene[] = [
     requiresSearch: false,
     requiresVision: false,
     scriptHint:
-      "Person A speaks Hindi, Person B speaks Kannada. Native should translate bidirectionally with minimal delay.",
+      "Bridge mode: Hindi <-> Kannada conversation with possible rip-off/overcharge cue detection.",
   },
 ];
 
@@ -185,6 +320,162 @@ function isPermissionDeniedError(error: unknown) {
   );
 }
 
+function clampConfidence(value: number) {
+  if (Number.isNaN(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return value;
+}
+
+function createRiskId() {
+  return `risk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function parseRiskLevel(raw: unknown): RiskLevel | null {
+  const value = String(raw || "").toLowerCase().trim();
+  if (value === "low" || value === "medium" || value === "high") {
+    return value;
+  }
+  return null;
+}
+
+function parseRiskType(raw: unknown): RiskType | null {
+  const value = String(raw || "").toLowerCase().trim();
+  if (value === "price" || value === "misinformation" || value === "urgency") {
+    return value;
+  }
+  return null;
+}
+
+function parseRiskSignalFromArgs(
+  args: Record<string, unknown> | undefined,
+  sourceLanguage: LanguageChoice,
+  targetLanguage: LanguageChoice,
+): RiskSignal | null {
+  if (!args) {
+    return null;
+  }
+
+  const type = parseRiskType(args.type);
+  const level = parseRiskLevel(args.level);
+  const cue = String(args.cue || "").trim();
+  const reason = String(args.reason || "").trim();
+  const action = String(args.action || "").trim();
+  const confidence = clampConfidence(Number(args.confidence || 0));
+  const baselineReference = String(args.baselineReference || "").trim();
+
+  if (!type || !level || !cue || !reason || !action) {
+    return null;
+  }
+
+  return {
+    id: createRiskId(),
+    type,
+    level,
+    cue,
+    reason,
+    action,
+    confidence,
+    sourceLanguage: sourceLanguage.id,
+    targetLanguage: targetLanguage.id,
+    timestamp: new Date().toISOString(),
+    baselineReference: baselineReference || undefined,
+    source: "model",
+  };
+}
+
+function detectHeuristicRisk(
+  transcript: string,
+  sourceLanguage: LanguageChoice,
+  targetLanguage: LanguageChoice,
+): RiskSignal | null {
+  const text = transcript.trim();
+  if (!text) {
+    return null;
+  }
+
+  const lower = text.toLowerCase();
+
+  const urgencyKeywords = [
+    "immediately",
+    "urgent",
+    "fine",
+    "penalty",
+    "police",
+    "last warning",
+    "deadline",
+    "jaldi",
+    "tatkal",
+    "ತಕ್ಷಣ",
+    "ದಂಡ",
+  ];
+
+  const misinformationKeywords = [
+    "agent",
+    "shortcut",
+    "sign quickly",
+    "don't read",
+    "different office",
+    "extra charge for form",
+    "commission",
+    "broker",
+  ];
+
+  const priceHints = /(₹|rs\.?|rupees|fare|charge|fees|price|rate|cost|ticket|rent)/i;
+  const highAmount = /\b([5-9]\d{2}|\d{4,})\b/;
+
+  if (urgencyKeywords.some((keyword) => lower.includes(keyword))) {
+    return {
+      id: createRiskId(),
+      type: "urgency",
+      level: "medium",
+      cue: text.slice(0, 110),
+      reason: "Urgent enforcement or deadline language detected.",
+      action: "Pause, verify with official staff/signage before acting.",
+      confidence: 0.66,
+      sourceLanguage: sourceLanguage.id,
+      targetLanguage: targetLanguage.id,
+      timestamp: new Date().toISOString(),
+      source: "heuristic",
+    };
+  }
+
+  if (misinformationKeywords.some((keyword) => lower.includes(keyword))) {
+    return {
+      id: createRiskId(),
+      type: "misinformation",
+      level: "medium",
+      cue: text.slice(0, 110),
+      reason: "Potential misleading instruction pattern detected.",
+      action: "Ask for written proof and confirm at official counter.",
+      confidence: 0.64,
+      sourceLanguage: sourceLanguage.id,
+      targetLanguage: targetLanguage.id,
+      timestamp: new Date().toISOString(),
+      source: "heuristic",
+    };
+  }
+
+  if (priceHints.test(lower) && highAmount.test(lower)) {
+    return {
+      id: createRiskId(),
+      type: "price",
+      level: "low",
+      cue: text.slice(0, 110),
+      reason: "Price mention detected. Overcharge check recommended.",
+      action: "Ask for printed rate list or compare with known local fare.",
+      confidence: 0.56,
+      sourceLanguage: sourceLanguage.id,
+      targetLanguage: targetLanguage.id,
+      timestamp: new Date().toISOString(),
+      baselineReference: "Context estimate; confirm using local posted rates.",
+      source: "heuristic",
+    };
+  }
+
+  return null;
+}
+
 function buildModeInstruction(
   mode: NativeMode | null,
   sourceLanguage: LanguageChoice,
@@ -195,10 +486,10 @@ function buildModeInstruction(
   }
 
   const prompts: Record<NativeMode, string> = {
-    SPOT: `CURRENT MODE: SPOT\nFocus on camera input. Proactively read visible text and explain what the user should do next in ${targetLanguage.label}.`,
-    ECHO: `CURRENT MODE: ECHO\nTranslate incoming speech into ${targetLanguage.label}. Output only translation. Preserve tone. Stay silent during silence and non-speech audio.`,
-    GUIDE: `CURRENT MODE: GUIDE\nUse what you see + what user asks + web grounding when needed. Always end with Step 1, Step 2, Step 3 in ${targetLanguage.label}.`,
-    BRIDGE: `CURRENT MODE: BRIDGE\nTwo-way interpretation mode. If speaker uses ${sourceLanguage.label}, translate to ${targetLanguage.label}. If speaker uses ${targetLanguage.label}, translate to ${sourceLanguage.label}. Output only translation with no commentary.`,
+    SPOT: `CURRENT MODE: SPOT\nFocus on camera input. Proactively read visible text and explain what user should do next in ${targetLanguage.label}.`,
+    ECHO: `CURRENT MODE: ECHO\nTranslate incoming speech into ${targetLanguage.label}. Output only translation. Preserve tone. Stay silent for non-speech/silence.`,
+    GUIDE: `CURRENT MODE: GUIDE\nUse what you see + what user asks + grounding when needed. Always end with Step 1, Step 2, Step 3 in ${targetLanguage.label}.`,
+    BRIDGE: `CURRENT MODE: BRIDGE\nBidirectional interpretation. If speaker uses ${sourceLanguage.label}, translate to ${targetLanguage.label}; if speaker uses ${targetLanguage.label}, translate to ${sourceLanguage.label}. Output translation only.`,
   };
 
   return prompts[mode];
@@ -210,48 +501,69 @@ function buildSystemPrompt({
   targetLanguage,
   safetyProfile,
   sceneContext,
+  riskPolicy,
+  proactivityPolicy,
 }: PromptContext) {
   const safetyLines = [
     safetyProfile.disallowMedicalLegalAdvice
-      ? "SAFETY: Never provide medical or legal diagnosis, prescriptions, or verdicts."
+      ? "SAFETY: Never provide medical or legal diagnosis, prescriptions, verdicts, or legal strategy."
       : "",
     safetyProfile.explainOfficialInstructionsOnly
-      ? "SAFETY: You may translate and explain official instructions from documents, announcements, or authorities in plain language."
+      ? "SAFETY: You may translate and explain official instructions from documents, notices, staff announcements, and forms in plain language."
       : "",
   ]
     .filter(Boolean)
     .join("\n");
 
+  const riskTypes = riskPolicy.enabledTypes.join(", ");
+
   return `You are native, a realtime multimodal local companion for India.
 
-You can see through camera, hear through microphone, use web grounding when needed, and speak naturally.
+MISSION:
+Help internal migrants become local faster by combining seeing, hearing, grounding, and practical next actions.
 
 CORE RULES:
-- Primary audience: internal migrants navigating unfamiliar Indian cities.
-- Preferred output language is ${targetLanguage.label} (${targetLanguage.display}) unless BRIDGE mode requires the opposite direction.
-- Keep responses short, practical, and action-oriented.
-- For forms, stations, hospitals, public offices, and transport: explain clearly and safely.
-- Do not introduce yourself repeatedly. Be an invisible helper.
+- Preferred output is ${targetLanguage.label} (${targetLanguage.display}), unless BRIDGE mode requires opposite direction.
+- Keep outputs short, practical, and actionable.
+- Avoid filler narration.
+
+${buildModeInstruction(mode, sourceLanguage, targetLanguage)}
+
+PROACTIVITY POLICY:
+- Style: ${proactivityPolicy.style}
+- Speak proactively only when confidence is high for meaningful risk or user asks explicitly.
+- Avoid narration spam during silence or low-signal context.
+
+LOCAL RISK GUARD:
+- Watch for risk types: ${riskTypes}
+- If actionable risk is detected, call function ${RISK_FUNCTION_NAME} with cue, reason, one-line action, level, and confidence.
+- For price risk, compare stated amount with context and grounding when available.
+- For misinformation risk, flag contradictions and suspicious process instructions.
+- For urgency risk, flag pressure cues, fines, penalties, or emergency language.
 
 ${safetyLines}
 
 LIVE CONTEXT:
 - Source language context: ${sourceLanguage.label}
 - Target language context: ${targetLanguage.label}
-- Current demo context: ${sceneContext || "General exploration"}
-
-${buildModeInstruction(mode, sourceLanguage, targetLanguage)}`;
+- Current scene focus: ${sceneContext || "General exploration"}`;
 }
 
 function buildConfig(
   promptContext: PromptContext,
   voiceName: string,
   searchEnabled: boolean,
+  riskGuardEnabled: boolean,
 ): LiveConnectConfig {
-  const tools: Tool[] =
-    promptContext.mode === "GUIDE" && searchEnabled
-      ? ([{ googleSearch: {} }] as Tool[])
-      : [];
+  const tools: Tool[] = [];
+
+  if (promptContext.mode === "GUIDE" && searchEnabled) {
+    tools.push({ googleSearch: {} });
+  }
+
+  if (riskGuardEnabled) {
+    tools.push({ functionDeclarations: [RISK_FUNCTION_DECLARATION] });
+  }
 
   return {
     responseModalities: [Modality.AUDIO],
@@ -275,6 +587,11 @@ function NativeConsole() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement>(null);
   const reconnectGuardRef = useRef<string>("");
+  const riskCooldownByType = useRef<Record<RiskType, number>>({
+    price: 0,
+    misinformation: 0,
+    urgency: 0,
+  });
 
   const webcam = useWebcam();
   const screenCapture = useScreenCapture();
@@ -288,11 +605,16 @@ function NativeConsole() {
   const [searchEnabled, setSearchEnabled] = useState(true);
   const [selectedSceneId, setSelectedSceneId] = useState<string>(DEMO_SCENES[0].id);
   const [sceneContext, setSceneContext] = useState<string>(DEMO_SCENES[0].scriptHint);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [micEnabled, setMicEnabled] = useState(false);
   const [visionEnabled, setVisionEnabled] = useState(false);
   const [visualSource, setVisualSource] = useState<"camera" | "screen">("camera");
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
+
+  const [riskGuardEnabled, setRiskGuardEnabled] = useState(true);
+  const [currentRisk, setCurrentRisk] = useState<RiskSignal | null>(null);
+  const [riskHistory, setRiskHistory] = useState<RiskSignal[]>([]);
 
   const [inputDraft, setInputDraft] = useState("");
   const [lastInputTranscript, setLastInputTranscript] = useState("");
@@ -323,18 +645,26 @@ function NativeConsole() {
       targetLanguage,
       safetyProfile: SAFETY_PROFILE,
       sceneContext,
+      riskPolicy: RISK_POLICY,
+      proactivityPolicy: PROACTIVITY_POLICY,
     }),
     [activeMode, sourceLanguage, targetLanguage, sceneContext],
   );
 
   const sessionConfig = useMemo(
-    () => buildConfig(promptContext, activeVoice, searchEnabled),
-    [promptContext, activeVoice, searchEnabled],
+    () => buildConfig(promptContext, activeVoice, searchEnabled, riskGuardEnabled),
+    [promptContext, activeVoice, searchEnabled, riskGuardEnabled],
   );
 
-  const sessionSignature = useMemo(
-    () => JSON.stringify(sessionConfig),
-    [sessionConfig],
+  const sessionSignature = useMemo(() => JSON.stringify(sessionConfig), [sessionConfig]);
+
+  const riskGuardState = useMemo<RiskGuardState>(
+    () => ({
+      enabled: riskGuardEnabled,
+      currentRisk,
+      history: riskHistory,
+    }),
+    [riskGuardEnabled, currentRisk, riskHistory],
   );
 
   const setLastError = useCallback((message: string | null) => {
@@ -363,6 +693,82 @@ function NativeConsole() {
       reconnecting: value,
     }));
   }, []);
+
+  const shouldReplaceRisk = useCallback((previous: RiskSignal | null, next: RiskSignal) => {
+    if (!previous) {
+      return true;
+    }
+
+    if (
+      previous.source === "model" &&
+      next.source === "heuristic" &&
+      RISK_LEVEL_PRIORITY[previous.level] >= RISK_LEVEL_PRIORITY.medium
+    ) {
+      const previousTime = new Date(previous.timestamp).getTime();
+      if (Date.now() - previousTime < 45000) {
+        return false;
+      }
+    }
+
+    if (next.source === "model" && previous.source === "heuristic") {
+      return true;
+    }
+
+    return RISK_LEVEL_PRIORITY[next.level] >= RISK_LEVEL_PRIORITY[previous.level];
+  }, []);
+
+  const applyRiskSignal = useCallback(
+    (signal: RiskSignal) => {
+      if (!riskGuardEnabled) {
+        return false;
+      }
+
+      if (!RISK_POLICY.enabledTypes.includes(signal.type)) {
+        return false;
+      }
+
+      if (
+        signal.level === "medium" &&
+        signal.confidence < RISK_POLICY.minConfidenceForMedium
+      ) {
+        return false;
+      }
+
+      if (signal.level === "high" && signal.confidence < RISK_POLICY.minConfidenceForHigh) {
+        return false;
+      }
+
+      const now = Date.now();
+      if (now - riskCooldownByType.current[signal.type] < RISK_POLICY.cooldownMs) {
+        return false;
+      }
+
+      riskCooldownByType.current[signal.type] = now;
+
+      setCurrentRisk((previous) => (shouldReplaceRisk(previous, signal) ? signal : previous));
+      setRiskHistory((previous) => [signal, ...previous].slice(0, 24));
+      return true;
+    },
+    [riskGuardEnabled, shouldReplaceRisk],
+  );
+
+  const maybeApplyHeuristicRisk = useCallback(
+    (transcript: string) => {
+      if (!riskGuardEnabled) {
+        return;
+      }
+      const heuristicSignal = detectHeuristicRisk(
+        transcript,
+        sourceLanguage,
+        targetLanguage,
+      );
+      if (!heuristicSignal) {
+        return;
+      }
+      void applyRiskSignal(heuristicSignal);
+    },
+    [applyRiskSignal, riskGuardEnabled, sourceLanguage, targetLanguage],
+  );
 
   useEffect(() => {
     setModel(MODEL_NAME);
@@ -522,9 +928,7 @@ function NativeConsole() {
         }
         if (!cancelled) {
           setMicEnabled(false);
-          setLastError(
-            toErrorMessage(error, "Could not start microphone capture."),
-          );
+          setLastError(toErrorMessage(error, "Could not start microphone capture."));
         }
       }
     };
@@ -539,14 +943,7 @@ function NativeConsole() {
       cancelled = true;
       audioRecorder.off("data", onData);
     };
-  }, [
-    audioRecorder,
-    client,
-    connected,
-    micEnabled,
-    setLastError,
-    setPermission,
-  ]);
+  }, [audioRecorder, client, connected, micEnabled, setLastError, setPermission]);
 
   const startVisionStream = useCallback(
     async (source: "camera" | "screen") => {
@@ -576,9 +973,7 @@ function NativeConsole() {
           setPermission("vision", "denied");
         }
         setVisionEnabled(false);
-        setLastError(
-          toErrorMessage(error, "Could not start visual capture."),
-        );
+        setLastError(toErrorMessage(error, "Could not start visual capture."));
         return false;
       }
     },
@@ -636,13 +1031,85 @@ function NativeConsole() {
   }, [connected, visionEnabled, activeStream, client]);
 
   useEffect(() => {
+    const onToolCall = (toolCall: LiveServerToolCall) => {
+      if (!riskGuardEnabled || !toolCall.functionCalls?.length) {
+        return;
+      }
+
+      const functionResponses = toolCall.functionCalls.map((functionCall) => {
+        if (functionCall.name !== RISK_FUNCTION_NAME) {
+          return {
+            id: functionCall.id,
+            name: functionCall.name,
+            response: {
+              output: {
+                accepted: false,
+                reason: "Unsupported function.",
+              },
+            },
+          };
+        }
+
+        const parsed = parseRiskSignalFromArgs(
+          functionCall.args,
+          sourceLanguage,
+          targetLanguage,
+        );
+
+        if (!parsed) {
+          return {
+            id: functionCall.id,
+            name: functionCall.name,
+            response: {
+              output: {
+                accepted: false,
+                reason: "Malformed risk signal payload.",
+              },
+            },
+          };
+        }
+
+        const accepted = applyRiskSignal(parsed);
+
+        return {
+          id: functionCall.id,
+          name: functionCall.name,
+          response: {
+            output: {
+              accepted,
+              reason: accepted ? "Risk signal recorded." : "Filtered by policy/cooldown.",
+            },
+          },
+        };
+      });
+
+      if (functionResponses.length) {
+        client.sendToolResponse({ functionResponses });
+      }
+    };
+
+    client.on("toolcall", onToolCall);
+    return () => {
+      client.off("toolcall", onToolCall);
+    };
+  }, [
+    applyRiskSignal,
+    client,
+    riskGuardEnabled,
+    sourceLanguage,
+    targetLanguage,
+  ]);
+
+  useEffect(() => {
     const onContent = (content: LiveServerContent) => {
       if (content.inputTranscription?.text) {
         setLastInputTranscript(content.inputTranscription.text);
+        maybeApplyHeuristicRisk(content.inputTranscription.text);
       }
 
       if (content.outputTranscription?.text) {
         setLastOutputTranscript(content.outputTranscription.text);
+        maybeApplyHeuristicRisk(content.outputTranscription.text);
       }
 
       const text =
@@ -653,22 +1120,22 @@ function NativeConsole() {
 
       if (text) {
         setEntries((previous) => [
-          ...previous.slice(-11),
           {
             id: `${Date.now()}-${Math.random()}`,
-            speaker: "native",
+            speaker: "native" as const,
             text,
           },
-        ]);
+          ...previous,
+        ].slice(0, 24));
+        maybeApplyHeuristicRisk(text);
       }
     };
 
     client.on("content", onContent);
-
     return () => {
       client.off("content", onContent);
     };
-  }, [client]);
+  }, [client, maybeApplyHeuristicRisk]);
 
   const toggleConnection = useCallback(async () => {
     setLastError(null);
@@ -716,7 +1183,6 @@ function NativeConsole() {
       turnOffVision();
       return;
     }
-
     await turnOnVision(visualSource);
   }, [turnOffVision, turnOnVision, visionEnabled, visualSource]);
 
@@ -777,9 +1243,13 @@ function NativeConsole() {
 
       client.send([{ text: trimmed }]);
       setEntries((previous) => [
-        ...previous.slice(-11),
-        { id: `${Date.now()}-${Math.random()}`, speaker: "you", text: trimmed },
-      ]);
+        {
+          id: `${Date.now()}-${Math.random()}`,
+          speaker: "you" as const,
+          text: trimmed,
+        },
+        ...previous,
+      ].slice(0, 24));
       setInputDraft("");
     },
     [client, connected, inputDraft],
@@ -799,35 +1269,106 @@ function NativeConsole() {
     <div className="native-app">
       <canvas ref={frameCanvasRef} className="hidden-canvas" />
 
-      <header className="hero">
-        <div>
-          <p className="eyebrow">India-first multimodal local companion</p>
+      <header className="top-rail">
+        <div className="brand-block">
+          <p className="eyebrow">Local Risk Guard</p>
           <h1>native</h1>
-          <p className="tagline">
-            The one app you need to become a local anywhere.
-          </p>
+          <p className="tagline">Become local, stay safe, act with confidence.</p>
         </div>
 
-        <button
-          className={cn("session-toggle", {
-            connected,
-            disabled: sessionHealth.reconnecting,
-          })}
-          onClick={() => void toggleConnection()}
-          disabled={sessionHealth.reconnecting}
-        >
-          {sessionHealth.reconnecting
-            ? "Reconnecting..."
-            : connected
-            ? "Pause Session"
-            : "Start Session"}
-        </button>
+        <div className="rail-controls">
+          <div className="chip-group mode-chip-group">
+            {(Object.keys(MODE_DETAILS) as NativeMode[]).map((mode) => (
+              <button
+                key={mode}
+                className={cn("rail-chip", { active: activeMode === mode })}
+                onClick={() =>
+                  setActiveMode((current) => (current === mode ? null : mode))
+                }
+              >
+                {MODE_DETAILS[mode].title}
+              </button>
+            ))}
+          </div>
+
+          <div className="scene-row">
+            <label htmlFor="scene-select">Scene</label>
+            <select
+              id="scene-select"
+              value={selectedSceneId}
+              onChange={(event) => void applyScenePreset(event.target.value)}
+            >
+              {DEMO_SCENES.map((scene) => (
+                <option key={scene.id} value={scene.id}>
+                  {scene.label}
+                </option>
+              ))}
+            </select>
+            <span className="scene-hint-inline">{activeScene?.scriptHint}</span>
+          </div>
+
+          <div className="pair-row">
+            <label htmlFor="source-language">Local</label>
+            <select
+              id="source-language"
+              value={sourceLanguage.id}
+              onChange={(event) =>
+                setSourceLanguage(getLanguage(event.target.value, sourceLanguage))
+              }
+            >
+              {LANGUAGES.map((language) => (
+                <option key={language.id} value={language.id}>
+                  {language.label}
+                </option>
+              ))}
+            </select>
+
+            <label htmlFor="target-language">Home</label>
+            <select
+              id="target-language"
+              value={targetLanguage.id}
+              onChange={(event) =>
+                setTargetLanguage(getLanguage(event.target.value, targetLanguage))
+              }
+            >
+              {LANGUAGES.map((language) => (
+                <option key={language.id} value={language.id}>
+                  {language.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="rail-actions">
+          <button
+            className={cn("session-toggle", {
+              connected,
+              disabled: sessionHealth.reconnecting,
+            })}
+            onClick={() => void toggleConnection()}
+            disabled={sessionHealth.reconnecting}
+          >
+            {sessionHealth.reconnecting
+              ? "Reconnecting..."
+              : connected
+              ? "Pause"
+              : "Start"}
+          </button>
+
+          <button
+            className={cn("risk-toggle", { active: riskGuardState.enabled })}
+            onClick={() => setRiskGuardEnabled((value) => !value)}
+          >
+            Risk Guard {riskGuardState.enabled ? "On" : "Off"}
+          </button>
+        </div>
       </header>
 
-      <main className="layout">
-        <section className="camera-shell">
-          <div className="shell-top">
-            <strong>What native sees</strong>
+      <main className="command-main">
+        <section className="vision-panel">
+          <div className="panel-head">
+            <strong>Live View</strong>
             <div className="source-switch">
               <button
                 className={cn({ active: visualSource === "camera" })}
@@ -854,214 +1395,189 @@ function NativeConsole() {
             {!activeStream && (
               <div className="empty-state">
                 <p>Visual input is off</p>
-                <span>Enable Camera or Screen to start Spot and Guide modes.</span>
+                <span>Enable Camera or Screen for Spot and Guide modes.</span>
               </div>
             )}
           </div>
 
-          <div className="toggles">
+          <div className="control-strip">
             <button
-              className={cn("feature-toggle", { active: micEnabled })}
+              className={cn("control-chip", { active: micEnabled })}
               onClick={() => void onMicToggle()}
             >
-              {micEnabled ? "Mic On" : "Mic Off"}
+              Mic {micEnabled ? "On" : "Off"}
             </button>
             <button
-              className={cn("feature-toggle", { active: visionEnabled })}
+              className={cn("control-chip", { active: visionEnabled })}
               onClick={() => void onVisualToggle()}
             >
-              {visionEnabled ? "Vision On" : "Vision Off"}
+              Vision {visionEnabled ? "On" : "Off"}
             </button>
             <button
-              className={cn("feature-toggle", {
+              className={cn("control-chip", {
                 active: searchEnabled,
                 disabled: activeMode !== "GUIDE",
               })}
               onClick={() => setSearchEnabled((value) => !value)}
               disabled={activeMode !== "GUIDE"}
             >
-              {searchEnabled ? "Search On" : "Search Off"}
+              Search {searchEnabled ? "On" : "Off"}
             </button>
           </div>
-
-          {activeMode === "GUIDE" && (
-            <p className="guide-indicator">
-              Guide grounding: <strong>{searchEnabled ? "Enabled" : "Disabled"}</strong>
-            </p>
-          )}
         </section>
 
-        <section className="control-shell">
-          <article className="panel scene-panel">
-            <h2>Demo Presets</h2>
-            <div className="scene-grid">
-              {DEMO_SCENES.map((scene) => (
-                <button
-                  key={scene.id}
-                  className={cn("scene-card", {
-                    active: selectedSceneId === scene.id,
-                  })}
-                  onClick={() => void applyScenePreset(scene.id)}
-                >
-                  <strong>{scene.label}</strong>
-                  <span>{MODE_DETAILS[scene.mode].title}</span>
-                </button>
-              ))}
-            </div>
-            <p className="scene-hint">{activeScene?.scriptHint}</p>
-          </article>
+        <section className="risk-panel">
+          <div className="panel-head">
+            <strong>Local Risk Guard</strong>
+            <span className="mode-tag">{activeMode || "Standby"}</span>
+          </div>
 
-          <article className="panel">
-            <h2>Modes</h2>
-            <div className="mode-grid">
-              {(Object.keys(MODE_DETAILS) as NativeMode[]).map((mode) => (
-                <button
-                  key={mode}
-                  className={cn("mode-card", { active: activeMode === mode })}
-                  onClick={() =>
-                    setActiveMode((current) => (current === mode ? null : mode))
-                  }
-                >
-                  <strong>{MODE_DETAILS[mode].title}</strong>
-                  <span>{MODE_DETAILS[mode].blurb}</span>
-                </button>
-              ))}
-            </div>
-          </article>
-
-          <article className="panel">
-            <h2>Language</h2>
-            <p className="language-label">Home language (output)</p>
-            <div className="language-row">
-              {LANGUAGES.map((language) => (
-                <button
-                  key={language.id}
-                  className={cn("language-pill", {
-                    active: targetLanguage.id === language.id,
-                  })}
-                  onClick={() => setTargetLanguage(language)}
-                >
-                  {language.display}
-                </button>
-              ))}
-            </div>
-
-            <div className="voice-row stack">
-              <label htmlFor="source-language">Local language context</label>
-              <select
-                id="source-language"
-                value={sourceLanguage.id}
-                onChange={(event) =>
-                  setSourceLanguage(
-                    getLanguage(event.target.value, sourceLanguage),
-                  )
-                }
-              >
-                {LANGUAGES.map((language) => (
-                  <option key={language.id} value={language.id}>
-                    {language.label} ({language.display})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="voice-row">
-              <label htmlFor="voice-select">Voice</label>
-              <select
-                id="voice-select"
-                value={activeVoice}
-                onChange={(event) => setActiveVoice(event.target.value)}
-              >
-                {VOICES.map((voice) => (
-                  <option key={voice} value={voice}>
-                    {voice}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </article>
-
-          <article className="panel">
-            <h2>Live state</h2>
-            <div className="status-grid">
-              {liveStatuses.map((status) => (
-                <div
-                  key={status.label}
-                  className={cn("status-chip", { active: status.active })}
-                >
-                  {status.label}
-                </div>
-              ))}
-            </div>
-
-            <div className="permission-grid">
-              <div
-                className={cn("permission-chip", {
-                  active: sessionHealth.permissions.mic === "granted",
-                  blocked: sessionHealth.permissions.mic === "denied",
-                })}
-              >
-                Mic permission: {sessionHealth.permissions.mic}
-              </div>
-              <div
-                className={cn("permission-chip", {
-                  active: sessionHealth.permissions.vision === "granted",
-                  blocked: sessionHealth.permissions.vision === "denied",
-                })}
-              >
-                Vision permission: {sessionHealth.permissions.vision}
-              </div>
-            </div>
-
-            <p className="mode-readout">
-              Mode: <strong>{activeMode ? MODE_DETAILS[activeMode].title : "Standby"}</strong>
-            </p>
-            <p className="mode-readout">
-              Pair: <strong>{sourceLanguage.label}</strong> to <strong>{targetLanguage.label}</strong>
-            </p>
-            <p className="mode-readout">
-              Model: <strong>{MODEL_NAME}</strong>
-            </p>
-
-            {(sessionHealth.lastError || sessionHealth.reconnecting) && (
-              <div className="session-alert">
-                <p>{sessionHealth.lastError || "Reconnecting live session..."}</p>
-                <button onClick={() => void retrySession()}>Retry Session</button>
-              </div>
+          <div
+            className={cn("risk-banner", {
+              low: riskGuardState.currentRisk?.level === "low",
+              medium: riskGuardState.currentRisk?.level === "medium",
+              high: riskGuardState.currentRisk?.level === "high",
+              neutral: !riskGuardState.currentRisk,
+            })}
+          >
+            {!riskGuardState.currentRisk ? (
+              <>
+                <p className="risk-level">No active risk signal</p>
+                <p className="risk-line">Listening for price, misinformation, and urgency cues.</p>
+              </>
+            ) : (
+              <>
+                <p className="risk-level">
+                  {riskGuardState.currentRisk.level.toUpperCase()} {" "}
+                  {riskGuardState.currentRisk.type}
+                </p>
+                <p className="risk-cue">"{riskGuardState.currentRisk.cue}"</p>
+                <p className="risk-line">Why: {riskGuardState.currentRisk.reason}</p>
+                <p className="risk-line strong">What next: {riskGuardState.currentRisk.action}</p>
+                {riskGuardState.currentRisk.baselineReference && (
+                  <p className="risk-line">
+                    Baseline: {riskGuardState.currentRisk.baselineReference}
+                  </p>
+                )}
+              </>
             )}
-          </article>
+          </div>
 
-          <article className="panel transcript-panel">
-            <h2>Live transcript</h2>
-            <p className="caption-line">
-              <strong>You:</strong> {lastInputTranscript || "..."}
-            </p>
-            <p className="caption-line">
-              <strong>native:</strong> {lastOutputTranscript || "..."}
-            </p>
-            <div className="entries">
-              {entries.length === 0 && <p className="empty-log">No messages yet.</p>}
-              {entries.map((entry) => (
-                <div key={entry.id} className={cn("entry", entry.speaker)}>
-                  <span>{entry.speaker === "you" ? "You" : "native"}</span>
-                  <p>{entry.text}</p>
-                </div>
-              ))}
-            </div>
-            <form onSubmit={submitTextPrompt} className="quick-ask">
-              <input
-                value={inputDraft}
-                onChange={(event) => setInputDraft(event.target.value)}
-                placeholder="Type a quick question or instruction"
-                disabled={!connected}
-              />
-              <button type="submit" disabled={!connected || !inputDraft.trim()}>
-                Send
-              </button>
-            </form>
-          </article>
+          <div className="status-grid">
+            {liveStatuses.map((status) => (
+              <div
+                key={status.label}
+                className={cn("status-chip", { active: status.active })}
+              >
+                {status.label}
+              </div>
+            ))}
+          </div>
+
+          <div className="risk-mini-history">
+            <p>Recent signals</p>
+            {riskGuardState.history.length === 0 ? (
+              <span className="history-empty">No signals yet.</span>
+            ) : (
+              <ul>
+                {riskGuardState.history.slice(0, 4).map((risk) => (
+                  <li key={risk.id}>
+                    <strong>{risk.level}</strong> {risk.type}: {risk.action}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </section>
       </main>
+
+      <section className="live-strip">
+        <div className="live-cell">
+          <span>You hear</span>
+          <p>{lastInputTranscript || "..."}</p>
+        </div>
+        <div className="live-cell">
+          <span>native says</span>
+          <p>{lastOutputTranscript || "..."}</p>
+        </div>
+      </section>
+
+      <details
+        className="advanced-drawer"
+        open={advancedOpen}
+        onToggle={(event) =>
+          setAdvancedOpen((event.currentTarget as HTMLDetailsElement).open)
+        }
+      >
+        <summary>Advanced controls and history</summary>
+        <div className="advanced-content">
+          <div className="advanced-row">
+            <label htmlFor="voice-select">Voice</label>
+            <select
+              id="voice-select"
+              value={activeVoice}
+              onChange={(event) => setActiveVoice(event.target.value)}
+            >
+              {VOICES.map((voice) => (
+                <option key={voice} value={voice}>
+                  {voice}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="permission-row">
+            <div
+              className={cn("permission-chip", {
+                active: sessionHealth.permissions.mic === "granted",
+                blocked: sessionHealth.permissions.mic === "denied",
+              })}
+            >
+              Mic permission: {sessionHealth.permissions.mic}
+            </div>
+            <div
+              className={cn("permission-chip", {
+                active: sessionHealth.permissions.vision === "granted",
+                blocked: sessionHealth.permissions.vision === "denied",
+              })}
+            >
+              Vision permission: {sessionHealth.permissions.vision}
+            </div>
+          </div>
+
+          {(sessionHealth.lastError || sessionHealth.reconnecting) && (
+            <div className="session-alert">
+              <p>{sessionHealth.lastError || "Reconnecting live session..."}</p>
+              <button onClick={() => void retrySession()}>Retry Session</button>
+            </div>
+          )}
+
+          <div className="entries">
+            {entries.length === 0 && <p className="empty-log">No messages yet.</p>}
+            {entries.map((entry) => (
+              <div key={entry.id} className={cn("entry", entry.speaker)}>
+                <span>{entry.speaker === "you" ? "You" : "native"}</span>
+                <p>{entry.text}</p>
+              </div>
+            ))}
+          </div>
+
+          <form onSubmit={submitTextPrompt} className="quick-ask">
+            <input
+              value={inputDraft}
+              onChange={(event) => setInputDraft(event.target.value)}
+              placeholder="Type a quick question or instruction"
+              disabled={!connected}
+            />
+            <button type="submit" disabled={!connected || !inputDraft.trim()}>
+              Send
+            </button>
+          </form>
+
+          {/* Blind mode hooks intentionally not rendered in production path. */}
+          {FEATURE_FLAGS.blindMode ? null : null}
+        </div>
+      </details>
     </div>
   );
 }
