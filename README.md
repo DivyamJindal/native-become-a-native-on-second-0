@@ -65,5 +65,7 @@ npm start
 ## Project docs
 
 - `/Users/divyamjindal/Desktop/zucks/deepmind hackathon/native/HACKATHON_COMPLIANCE.md`
+- `/Users/divyamjindal/Desktop/zucks/deepmind hackathon/native/HANDOVER.md`
 - `/Users/divyamjindal/Desktop/zucks/deepmind hackathon/native/docs/DEMO_RUNBOOK.md`
 - `/Users/divyamjindal/Desktop/zucks/deepmind hackathon/native/docs/SUBMISSION.md`
+- `/Users/divyamjindal/Desktop/zucks/deepmind hackathon/native/docs/AI_IDE_HANDOFF.md`
