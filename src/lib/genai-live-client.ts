@@ -205,6 +205,8 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
         this.emit("turncomplete");
       }
 
+      let emittedContent: LiveServerContent | null = null;
+
       if ("modelTurn" in serverContent) {
         let parts: Part[] = serverContent.modelTurn?.parts || [];
 
@@ -225,14 +227,26 @@ export class GenAILiveClient extends EventEmitter<LiveClientEventTypes> {
             this.log(`server.audio`, `buffer (${data.byteLength})`);
           }
         });
-        if (!otherParts.length) {
-          return;
-        }
-
         parts = otherParts;
+        if (parts.length) {
+          emittedContent = {
+            ...serverContent,
+            modelTurn: { parts } as Content,
+          };
+        }
+      }
 
-        const content: { modelTurn: Content } = { modelTurn: { parts } };
-        this.emit("content", content);
+      if (!emittedContent) {
+        const hasTranscription =
+          !!serverContent.inputTranscription?.text ||
+          !!serverContent.outputTranscription?.text;
+        if (hasTranscription) {
+          emittedContent = serverContent;
+        }
+      }
+
+      if (emittedContent) {
+        this.emit("content", emittedContent);
         this.log(`server.content`, message);
       }
     } else {
