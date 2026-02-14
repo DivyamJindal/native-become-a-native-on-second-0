@@ -38,10 +38,11 @@ const MODEL_NAME =
 
 const RISK_FUNCTION_NAME = "emit_risk_signal";
 const FORMATTED_CONTENT_FUNCTION_NAME = "emit_formatted_content";
+const CONTRACT_FUNCTION_NAME = "emit_contract_term";
 
 /* ─── Types ─── */
 
-type NativeMode = "GUIDE" | "BRIDGE";
+type NativeMode = "GUIDE" | "SPOT" | "BAKSHI";
 type PermissionFlag = "unknown" | "granted" | "denied" | "prompt";
 type RiskType = "price" | "misinformation" | "urgency";
 type RiskLevel = "low" | "medium" | "high";
@@ -61,6 +62,17 @@ type FormattedContent = {
   markdown: string;
   language: string;
   timestamp: string;
+};
+
+type ContractTerm = {
+  id: string;
+  type: string;
+  parties: string;
+  summary: string;
+  amount?: string;
+  obligation?: string;
+  deadline?: string;
+  confidence: number;
 };
 
 type UserLocation = {
@@ -129,11 +141,15 @@ const VOICES = ["Kore", "Aoede", "Puck", "Charon"];
 const MODE_DETAILS: Record<NativeMode, { title: string; blurb: string }> = {
   GUIDE: {
     title: "Guide",
-    blurb: "Talk and explore. Camera optional.",
+    blurb: "Voice-first translation and guidance.",
   },
-  BRIDGE: {
-    title: "Bridge",
-    blurb: "Live translation of your surroundings.",
+  SPOT: {
+    title: "Spot",
+    blurb: "Camera companion — reads signs and menus.",
+  },
+  BAKSHI: {
+    title: "Bakshi",
+    blurb: "Digital contract witness.",
   },
 };
 
@@ -221,6 +237,25 @@ const FORMATTED_CONTENT_DECLARATION: FunctionDeclaration = {
   },
 };
 
+const CONTRACT_FUNCTION_DECLARATION: FunctionDeclaration = {
+  name: CONTRACT_FUNCTION_NAME,
+  description:
+    "Extract a structured contract term from the oral agreement being discussed.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      type: { type: Type.STRING, description: "Type of term (payment, service, penalty, duration, etc.)." },
+      parties: { type: Type.STRING, description: "Names or roles of the parties involved." },
+      summary: { type: Type.STRING, description: "Concise summary of the agreed term." },
+      amount: { type: Type.STRING, description: "Monetary amount if applicable." },
+      obligation: { type: Type.STRING, description: "What is owed or required." },
+      deadline: { type: Type.STRING, description: "Due date or timeframe." },
+      confidence: { type: Type.NUMBER, description: "Confidence in this extraction from 0.0 to 1.0." },
+    },
+    required: ["type", "parties", "summary", "confidence"],
+  },
+};
+
 const LANGUAGE_BY_ID = LANGUAGES.reduce<Record<string, LanguageChoice>>(
   (map, l) => { map[l.id] = l; return map; },
   {},
@@ -300,7 +335,7 @@ function detectHeuristicRisk(
   if (!text) return null;
   const lower = text.toLowerCase();
 
-  const urgency = ["immediately", "urgent", "fine", "penalty", "police", "last warning", "deadline", "jaldi", "tatkal", "ತಕ್ಷಣ", "ದಂಡ"];
+  const urgency = ["immediately", "urgent", "fine", "penalty", "police", "last warning", "deadline", "jaldi", "tatkal"];
   const misinfo = ["agent", "shortcut", "sign quickly", "don't read", "different office", "extra charge for form", "commission", "broker"];
   const priceHints = /(₹|rs\.?|rupees|fare|charge|fees|price|rate|cost|ticket|rent)/i;
   const highAmt = /\b([5-9]\d{2}|\d{4,})\b/;
@@ -322,62 +357,91 @@ function detectHeuristicRisk(
 function buildModeInstruction(
   mode: NativeMode,
   targetLanguage: LanguageChoice,
-  cameraOn: boolean,
 ) {
   if (mode === "GUIDE") {
-    const cameraBlock = cameraOn
-      ? `
-CAMERA IS ACTIVE — you can see what the user sees.
-Additional responsibilities when camera is on:
-- Proactively read visible text, signs, labels, menus, notices, timetables, and documents. Explain what they mean and what the user should do, in ${targetLanguage.label}.
-- For complex content (menus with prices, timetables, forms, multi-line signs — anything with 3+ items or structured data): speak a brief 2–3 sentence audio summary AND call ${FORMATTED_CONTENT_FUNCTION_NAME} with a full markdown breakdown translated into ${targetLanguage.label}.
-- When reading text in another language, translate naturally — do not read the original aloud unless asked.
-- For documents and forms: explain each field and what to fill in.
-- If you see suspicious pricing, misleading signs, or anything concerning — flag via ${RISK_FUNCTION_NAME}.
-- When nothing new is visible, stay silent. Do not re-narrate the same scene.`
-      : `
-CAMERA IS OFF — audio only.
-- Focus entirely on the user's spoken questions.
-- If the user describes something visual, ask clarifying questions or suggest they turn on the camera.`;
+    return `CURRENT MODE: GUIDE (Voice-First Translation & Guidance)
 
-    return `CURRENT MODE: GUIDE
+You are translating and explaining what the user hears around them. The microphone picks up speech from people talking to the user, announcements, conversations, vendors, etc.
 
-You are the user's personal voice assistant. They speak to you and you respond in audio.
+CRITICAL RULE -- TRANSLATE FIRST, NEVER ANSWER AS YOURSELF:
+- You are NOT a chatbot. You are a translator and guide.
+- When you hear speech in ANY language, your FIRST job is to TRANSLATE it into ${targetLanguage.label}.
+- Do NOT interpret questions as being asked to you. They are being spoken BY someone else TO the user.
+- Example: if you hear "aapka naam kya hai?" in Hindi, you must translate it as: "They are asking: What is your name?" -- do NOT reply with your own name.
+- Example: if you hear "yeh kitne ka hai?" you translate: "They are asking: How much does this cost?"
+- Only provide guidance/answers when the user EXPLICITLY addresses you (e.g. "Hey Native, what should I do?").
 
 YOUR JOB:
-- Listen to the user's questions and requests.
-- Answer in ${targetLanguage.label} with clear, practical guidance.
-- Structure complex answers as numbered steps.
-- Use Google Search when the question involves local information (routes, timings, procedures, prices, customs) or anything you are not certain about.
-- If the user describes a suspicious situation, assess it and advise.
-${cameraBlock}
+1. AUTO-DETECT the language of incoming speech every turn. Do not assume -- detect from the audio/text.
+2. If the detected language DIFFERS from ${targetLanguage.label}: translate it accurately into ${targetLanguage.label}, then briefly explain the intent and suggest what the user should do or say back.
+3. If the detected language IS ${targetLanguage.label}: provide a concise interpretation and actionable next step. Do not re-translate.
+4. Use Google Search grounding when the context involves local information: bus routes, train timings, government office procedures, local prices, customs, or anything you are not 100% certain about.
+5. If the user describes a situation (e.g. "someone is asking me to pay 500 for a form"), proactively assess whether it sounds legitimate and advise accordingly.
 
-RULES:
-- Stay silent during silence.
-- Keep responses under 3–4 sentences unless more detail is requested.
-- Ignore ambient noise not directed at you.`;
+PRICING RULES (STRICT -- NEVER VIOLATE):
+- NEVER invent, guess, or hallucinate a specific price. If you don't have grounded search data, say "I'm not sure of the exact price" and use Google Search.
+- ALWAYS use Google Search grounding BEFORE quoting any price, fare, fee, or cost.
+- Only quote prices that come directly from search results.
+- Prefer price RANGES over exact numbers (e.g. "typically 50-100 rupees" not "75 rupees").
+- Always add a disclaimer: "prices may vary" or "based on search results".
+- If search returns no price data, say so honestly: "I couldn't find current pricing -- ask the vendor directly and check posted rates."
+- When someone quotes a price to the user, compare it against search-grounded data. If no data exists, say "I can't verify this -- ask for a printed rate card."
+
+BEHAVIORAL RULES:
+- Stay silent during silence. Do not narrate or fill gaps.
+- Keep responses under 3-4 sentences unless the user asks for more detail.
+- If you hear ambient noise that is not speech, ignore it.
+- Always respond in ${targetLanguage.label}.
+- Structure: first speak the translation (1 line), then briefly explain meaning and suggest next action.`;
   }
 
-  // BRIDGE mode
-  return `CURRENT MODE: BRIDGE
+  if (mode === "SPOT") {
+    return `CURRENT MODE: SPOT (Camera Companion)
 
-You are a live ambient interpreter. The user's microphone picks up surrounding sound — announcements, conversations, vendor calls, PA systems. Your job is to translate and relay them in ${targetLanguage.label}.
+You have access to both the user's microphone and camera. You can see what they see and hear what they say.
 
 YOUR JOB:
-- Auto-detect what language is being spoken around the user.
-- Translate all speech into ${targetLanguage.label}.
-- Preserve tone, urgency, and intent.
-- For announcements (train, bus, PA): extract key info (platform, time, destination, action) and state it clearly.
-- For conversations: provide a brief summary, not word-for-word.
-- If someone speaks directly to the user, translate what they said and suggest a response.
+1. PROACTIVE VISUAL READING: When you see text, signs, labels, menus, notices, timetables, or documents in the camera -- read them aloud and explain what they mean and what the user should do, all in ${targetLanguage.label}.
+2. COMPLEX CONTENT -> FORMATTED OUTPUT: When you see content with more than 3 items or structured data (menus with prices, timetables, forms with fields, multi-line notices), do BOTH:
+   a. Speak a brief audio summary (2-3 sentences, key points only).
+   b. Call the ${FORMATTED_CONTENT_FUNCTION_NAME} function with a full markdown breakdown translated into ${targetLanguage.label}. Use tables for prices, bullet lists for items, and headers for sections.
+3. CONVERSATIONAL: The user can also ask you questions about what they see or about anything else. Answer in ${targetLanguage.label} with step-by-step guidance. Use Google Search grounding for local facts.
+4. RISK DETECTION: If you see or hear pricing that seems inflated, a suspicious sign, or a misleading notice -- flag it via ${RISK_FUNCTION_NAME}.
+5. AUTO-DETECT any language visible in the camera. Translate naturally into ${targetLanguage.label}.
+
+PRICING RULES (STRICT -- NEVER VIOLATE):
+- NEVER invent, guess, or hallucinate a specific price. If you don't have grounded search data, say "I'm not sure of the exact price" and use Google Search.
+- ALWAYS use Google Search grounding BEFORE quoting any price, fare, fee, or cost.
+- Only quote prices that come directly from search results.
+- Prefer price RANGES over exact numbers.
+- Always add a disclaimer: "prices may vary" or "based on search results".
+
+BEHAVIORAL RULES:
+- When nothing new is visible, stay silent. Do not narrate the same scene repeatedly.
+- Prioritize what's most actionable: prices, directions, deadlines, warnings.
+- When reading a sign in another language, translate it naturally -- don't read the original aloud unless the user asks.
+- For documents and forms: explain each field's purpose and what the user should fill in.`;
+  }
+
+  // BAKSHI mode
+  return `CURRENT MODE: BAKSHI (Digital Contract Witness)
+
+You are BAKSHI -- an oral contract witness and structuring assistant.
+
+YOUR JOB:
+- Listen to two-party agreement discussions and capture each concrete term.
+- For each commitment, amount, obligation, or deadline mentioned, call ${CONTRACT_FUNCTION_NAME} to extract and record it.
+- Ask concise clarifying questions if essential fields are missing (e.g. amount, deadline, parties).
+- When asked for a summary, provide a clear, structured overview of all captured terms.
+- Output in ${targetLanguage.label} (${targetLanguage.display}).
 
 RULES:
-- Output only translations and summaries. No commentary.
-- Stay silent during silence or non-speech noise.
-- Focus on the loudest or most relevant speaker when multiple people talk.
-- Keep translations short and natural.
-- If you detect urgency (last call, platform change), emphasize it.
-- If you detect risk (overcharge, scam, pressure), flag via ${RISK_FUNCTION_NAME} and still translate.`;
+- Be neutral and factual. You are a witness, not an advisor.
+- Do NOT provide legal advice or opinions on fairness.
+- Do NOT take sides between parties.
+- Capture terms exactly as stated. If something is ambiguous, flag it explicitly.
+- Stay silent when parties are not discussing terms.
+- When a party makes a commitment, immediately extract it via ${CONTRACT_FUNCTION_NAME}.`;
 }
 
 function buildLocationBlock(location: UserLocation): string {
@@ -391,24 +455,28 @@ USER LOCATION:
 - Use this location for all context: price comparisons, directions, local customs, nearby landmarks, time-appropriate suggestions. If the user asks "where" or "how to get to", use their GPS as starting point.`;
 }
 
-function buildSystemPrompt({ mode, targetLanguage, userLocation, cameraOn }: PromptContext) {
-  return `You are native — a realtime voice companion for travellers and migrants in India.
+function buildSystemPrompt({ mode, targetLanguage, userLocation }: PromptContext) {
+  return `You are native -- a realtime voice companion for travellers and migrants in India.
 
 IDENTITY:
 - You are a trusted local companion. Speak clearly and simply.
 - Always respond in ${targetLanguage.label} (${targetLanguage.display}).
 - Be concise and actionable. No filler phrases.
+- Auto-detect the language of incoming speech every turn.
+- NEVER answer questions as if they are directed at you. Translate them for the user instead (unless user explicitly addresses you).
 
-${buildModeInstruction(mode, targetLanguage, cameraOn)}
+${buildModeInstruction(mode, targetLanguage)}
 
 SAFETY:
 - No medical diagnoses, legal verdicts, or prescriptions.
 - You may translate and explain official documents and notices in plain language.
 - If unsure, say so. Do not fabricate information.
+- NEVER fabricate prices, fares, fees, or costs. Use Google Search grounding for ALL price/cost queries. If grounding returns no data, tell the user you cannot confirm the price.
 
-RISK AWARENESS (always active):
+RISK AWARENESS (always active in GUIDE and SPOT modes):
 - Monitor for: price gouging, misinformation, urgency/pressure tactics.
 - When detected, call ${RISK_FUNCTION_NAME} with type, level, cue, reason, action, confidence.
+- For price risks: ALWAYS use Google Search grounding to find real local rates before comparing. Never compare against a made-up baseline. If no grounding data exists, tell the user to verify with official/posted rates.
 ${buildLocationBlock(userLocation)}`;
 }
 
@@ -420,15 +488,25 @@ function buildConfig(
 ): LiveConnectConfig {
   const tools: Tool[] = [];
 
-  if (promptContext.mode === "GUIDE") {
+  if (promptContext.mode === "GUIDE" || promptContext.mode === "SPOT") {
     tools.push({ googleSearch: {} });
   }
 
-  const fnDeclarations: FunctionDeclaration[] = [RISK_FUNCTION_DECLARATION];
-  if (promptContext.mode === "GUIDE" && promptContext.cameraOn) {
+  const fnDeclarations: FunctionDeclaration[] = [];
+
+  if (promptContext.mode === "GUIDE" || promptContext.mode === "SPOT") {
+    fnDeclarations.push(RISK_FUNCTION_DECLARATION);
+  }
+  if (promptContext.mode === "SPOT") {
     fnDeclarations.push(FORMATTED_CONTENT_DECLARATION);
   }
-  tools.push({ functionDeclarations: fnDeclarations });
+  if (promptContext.mode === "BAKSHI") {
+    fnDeclarations.push(CONTRACT_FUNCTION_DECLARATION);
+  }
+
+  if (fnDeclarations.length > 0) {
+    tools.push({ functionDeclarations: fnDeclarations });
+  }
 
   return {
     responseModalities: [Modality.AUDIO],
@@ -470,6 +548,7 @@ function NativeConsole() {
 
   const [currentRisk, setCurrentRisk] = useState<RiskSignal | null>(null);
   const [formattedContents, setFormattedContents] = useState<FormattedContent[]>([]);
+  const [contractTerms, setContractTerms] = useState<ContractTerm[]>([]);
 
   const [inputDraft, setInputDraft] = useState("");
   const [lastInputTranscript, setLastInputTranscript] = useState("");
@@ -728,6 +807,23 @@ function NativeConsole() {
           setFormattedContents(p => [{ id: `fc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, contentType: ct, title, markdown: md, language: lang, timestamp: new Date().toISOString() }, ...p].slice(0, 10));
           return { id: fc.id, name: fc.name, response: { output: { accepted: true, reason: "Recorded." } } };
         }
+        if (fc.name === CONTRACT_FUNCTION_NAME) {
+          const a = fc.args || {};
+          const term: ContractTerm = {
+            id: `ct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            type: String(a.type || "general"),
+            parties: String(a.parties || ""),
+            summary: String(a.summary || ""),
+            amount: a.amount ? String(a.amount) : undefined,
+            obligation: a.obligation ? String(a.obligation) : undefined,
+            deadline: a.deadline ? String(a.deadline) : undefined,
+            confidence: clampConfidence(Number(a.confidence || 0.5)),
+          };
+          if (term.summary) {
+            setContractTerms(p => [term, ...p].slice(0, 40));
+          }
+          return { id: fc.id, name: fc.name, response: { output: { accepted: true, reason: "Contract term recorded." } } };
+        }
         return { id: fc.id, name: fc.name, response: { output: { accepted: false, reason: "Unknown." } } };
       });
       if (responses.length) client.sendToolResponse({ functionResponses: responses });
@@ -755,11 +851,18 @@ function NativeConsole() {
     setActiveMode(mode);
     setLastError(null);
     setFormattedContents([]);
-    // Bridge mode: camera off
-    if (mode === "BRIDGE" && cameraOn) turnOffCamera();
+
+    // SPOT mode: auto-start camera
+    if (mode === "SPOT") {
+      if (!cameraOn) await turnOnCamera();
+    } else {
+      // Other modes: turn off camera
+      if (cameraOn) turnOffCamera();
+    }
+
     // Always need mic
     if (!micEnabled) await enableMic();
-  }, [cameraOn, turnOffCamera, enableMic, micEnabled, setLastError]);
+  }, [cameraOn, turnOffCamera, turnOnCamera, enableMic, micEnabled, setLastError]);
 
   const toggleConnection = useCallback(async () => {
     setLastError(null); setReconnecting(true);
@@ -784,6 +887,16 @@ function NativeConsole() {
     client.send([{ text: t }]);
     setInputDraft("");
   }, [client, connected, inputDraft]);
+
+  const runBakshiAction = useCallback((kind: "start" | "clarify" | "summary") => {
+    if (!connected) return;
+    const prompts = {
+      start: "Begin as BAKSHI witness. Ask both parties to state names and first agreed term clearly.",
+      clarify: "Ask clarifying questions for missing amounts, obligations, deadlines, and penalties.",
+      summary: "Provide concise final agreement summary and list missing or ambiguous terms.",
+    };
+    client.send([{ text: `[BAKSHI_ACTION:${kind.toUpperCase()}] ${prompts[kind]}` }]);
+  }, [client, connected]);
 
   /* ─── Render ─── */
 
@@ -834,31 +947,58 @@ function NativeConsole() {
       </div>
 
       <main className="main-area">
-        {cameraOn && activeMode === "GUIDE" ? (
+        {cameraOn && activeMode === "SPOT" ? (
           <div className="camera-feed">
             <video ref={videoRef} autoPlay playsInline className={cn("stream", { hidden: !activeStream })} />
             {!activeStream && <div className="placeholder"><span>Camera starting...</span></div>}
+          </div>
+        ) : activeMode === "BAKSHI" ? (
+          <div className="bakshi-area">
+            <div className="bakshi-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+                <polyline points="10 9 9 9 8 9" />
+              </svg>
+            </div>
+            <span className="area-label">
+              {connected ? "listening for agreement" : "tap start to begin"}
+            </span>
           </div>
         ) : (
           <div className={cn("audio-area", { pulsing: connected && volume > 0.02 })}>
             <div className="ring r1" />
             <div className="ring r2" />
             <span className="area-label">
-              {connected
-                ? activeMode === "BRIDGE" ? "translating surroundings" : "listening"
-                : "tap start"}
+              {connected ? "listening" : "tap start"}
             </span>
           </div>
         )}
       </main>
 
-      {activeMode === "GUIDE" && (
+      {activeMode === "SPOT" && (
         <button
           className={cn("pill-btn camera-toggle", { active: cameraOn })}
           onClick={() => void toggleCamera()}
         >
           {cameraOn ? "camera on" : "camera off"}
         </button>
+      )}
+
+      {activeMode === "BAKSHI" && connected && (
+        <div className="bakshi-actions">
+          <button className="pill-btn" onClick={() => runBakshiAction("start")}>
+            Start Agreement
+          </button>
+          <button className="pill-btn" onClick={() => runBakshiAction("clarify")}>
+            Clarify Terms
+          </button>
+          <button className="pill-btn" onClick={() => runBakshiAction("summary")}>
+            Generate Summary
+          </button>
+        </div>
       )}
 
       <div className="transcript">
@@ -890,6 +1030,28 @@ function NativeConsole() {
             <div key={fc.id} className="fc-card">
               <p className="fc-title">{fc.title}</p>
               <pre className="fc-md">{fc.markdown}</pre>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {contractTerms.length > 0 && (
+        <section className="contract-panel">
+          <div className="contract-head">
+            <strong>Contract Terms</strong>
+            <button className="pill-btn sm" onClick={() => setContractTerms([])}>clear</button>
+          </div>
+          {contractTerms.map(ct => (
+            <div key={ct.id} className="contract-card">
+              <div className="ct-top">
+                <span className="ct-type">{ct.type}</span>
+                <span className="ct-conf">{Math.round(ct.confidence * 100)}%</span>
+              </div>
+              <p className="ct-parties">{ct.parties}</p>
+              <p className="ct-summary">{ct.summary}</p>
+              {ct.amount && <p className="ct-detail">Amount: {ct.amount}</p>}
+              {ct.obligation && <p className="ct-detail">Obligation: {ct.obligation}</p>}
+              {ct.deadline && <p className="ct-detail">Deadline: {ct.deadline}</p>}
             </div>
           ))}
         </section>
