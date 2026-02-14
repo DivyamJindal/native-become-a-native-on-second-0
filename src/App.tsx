@@ -39,6 +39,7 @@ const MODEL_NAME =
 const RISK_FUNCTION_NAME = "emit_risk_signal";
 const SUGGESTION_FUNCTION_NAME = "emit_suggestion";
 const MODE_SIGNAL_FUNCTION_NAME = "emit_mode_signal";
+const FORMATTED_CONTENT_FUNCTION_NAME = "emit_formatted_content";
 
 type NativeMode = "SPOT" | "ECHO" | "GUIDE" | "BRIDGE" | "SHIELD" | "AUTO";
 type PermissionFlag = "unknown" | "granted" | "denied" | "prompt";
@@ -67,6 +68,17 @@ type TranscriptEntry = {
   id: string;
   speaker: "native" | "you";
   text: string;
+};
+
+type FormattedContentType = "menu" | "document" | "form" | "sign" | "table" | "general";
+
+type FormattedContent = {
+  id: string;
+  contentType: FormattedContentType;
+  title: string;
+  markdown: string;
+  language: string;
+  timestamp: string;
 };
 
 type SafetyProfile = {
@@ -242,6 +254,35 @@ const SUGGESTION_FUNCTION_DECLARATION: FunctionDeclaration = {
       },
     },
     required: ["category", "title", "detail", "action", "confidence"],
+  },
+};
+
+const FORMATTED_CONTENT_DECLARATION: FunctionDeclaration = {
+  name: FORMATTED_CONTENT_FUNCTION_NAME,
+  description:
+    "Emit a rich formatted breakdown of complex visual content such as menus, documents, forms, signs, or tables. Use this when the camera shows content that benefits from structured text representation alongside the spoken audio summary.",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      contentType: {
+        type: Type.STRING,
+        enum: ["menu", "document", "form", "sign", "table", "general"],
+        description: "The type of content detected.",
+      },
+      title: {
+        type: Type.STRING,
+        description: "Short title describing the content, e.g. 'Restaurant Menu' or 'Bus Timetable'.",
+      },
+      markdown: {
+        type: Type.STRING,
+        description: "Detailed markdown-formatted breakdown of the content. Use headers, bullet lists, tables, bold for prices/key info. Translate all text into the target language.",
+      },
+      language: {
+        type: Type.STRING,
+        description: "The language the markdown is written in.",
+      },
+    },
+    required: ["contentType", "title", "markdown", "language"],
   },
 };
 
@@ -563,7 +604,7 @@ function buildModeInstruction(
   }
 
   const prompts: Record<NativeMode, string> = {
-    SPOT: `CURRENT MODE: SPOT\nFocus on camera input. Proactively read visible text and explain what user should do next in ${targetLanguage.label}.`,
+    SPOT: `CURRENT MODE: SPOT\nFocus on camera input. Proactively read visible text and explain what user should do next in ${targetLanguage.label}.\nFor complex visual content (menus, documents, forms, timetables, signs with multiple items), speak a brief audio summary and ALSO call ${FORMATTED_CONTENT_FUNCTION_NAME} with a detailed markdown breakdown translated into ${targetLanguage.label}. Use tables for prices, bullet lists for items, and headers for sections. Always call the function for any content with more than 3 items or structured data.`,
     ECHO: `CURRENT MODE: ECHO\nTranslate incoming speech into ${targetLanguage.label}. Output only translation. Preserve tone. Stay silent for non-speech/silence.`,
     GUIDE: `CURRENT MODE: GUIDE\nUse what you see + what user asks + grounding when needed. Always end with Step 1, Step 2, Step 3 in ${targetLanguage.label}.`,
     BRIDGE: `CURRENT MODE: BRIDGE\nBidirectional interpretation. If speaker uses ${sourceLanguage.label}, translate to ${targetLanguage.label}; if speaker uses ${targetLanguage.label}, translate to ${sourceLanguage.label}. Output translation only.`,
@@ -648,6 +689,9 @@ function buildConfig(
   if (promptContext.mode === "SHIELD" || isAutoMode) {
     fnDeclarations.push(SUGGESTION_FUNCTION_DECLARATION);
   }
+  if (promptContext.mode === "SPOT" || isAutoMode) {
+    fnDeclarations.push(FORMATTED_CONTENT_DECLARATION);
+  }
   if (isAutoMode) {
     fnDeclarations.push({
       name: MODE_SIGNAL_FUNCTION_NAME,
@@ -724,6 +768,7 @@ function NativeConsole() {
   const [currentRisk, setCurrentRisk] = useState<RiskSignal | null>(null);
   const [riskHistory, setRiskHistory] = useState<RiskSignal[]>([]);
   const [suggestions, setSuggestions] = useState<SmartSuggestion[]>([]);
+  const [formattedContents, setFormattedContents] = useState<FormattedContent[]>([]);
   const [autoDetectedBehavior, setAutoDetectedBehavior] = useState<string | null>(null);
   const [autoDetectedReason, setAutoDetectedReason] = useState<string | null>(null);
 
@@ -1239,6 +1284,40 @@ function NativeConsole() {
           };
         }
 
+        // Handle formatted content (Spot mode)
+        if (functionCall.name === FORMATTED_CONTENT_FUNCTION_NAME) {
+          const args = functionCall.args || {};
+          const contentType = String(args.contentType || "general").trim() as FormattedContentType;
+          const title = String(args.title || "").trim();
+          const markdown = String(args.markdown || "").trim();
+          const language = String(args.language || "").trim();
+
+          const validTypes: FormattedContentType[] = ["menu", "document", "form", "sign", "table", "general"];
+          if (!validTypes.includes(contentType) || !title || !markdown) {
+            return {
+              id: functionCall.id,
+              name: functionCall.name,
+              response: { output: { accepted: false, reason: "Malformed formatted content payload." } },
+            };
+          }
+
+          const content: FormattedContent = {
+            id: `fc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            contentType,
+            title,
+            markdown,
+            language,
+            timestamp: new Date().toISOString(),
+          };
+
+          setFormattedContents((prev) => [content, ...prev].slice(0, 10));
+          return {
+            id: functionCall.id,
+            name: functionCall.name,
+            response: { output: { accepted: true, reason: "Formatted content recorded." } },
+          };
+        }
+
         // Unknown function
         return {
           id: functionCall.id,
@@ -1712,6 +1791,64 @@ function NativeConsole() {
                 onClick={() => setSuggestions([])}
               >
                 Clear all suggestions
+              </button>
+            )}
+          </section>
+        )}
+
+        {/* Formatted Content Panel (Spot / Auto mode) */}
+        {(activeMode === "SPOT" || activeMode === "AUTO") && (
+          <section className="formatted-content-panel">
+            <div className="panel-head">
+              <strong>📄 Visual Content</strong>
+              <span className="suggestion-count">
+                {formattedContents.length} item{formattedContents.length !== 1 ? "s" : ""}
+              </span>
+            </div>
+
+            {formattedContents.length === 0 ? (
+              <div className="suggestion-empty">
+                <p className="suggestion-empty-title">Point camera at text</p>
+                <p className="suggestion-empty-hint">
+                  When Spot sees menus, documents, forms, signs, or tables, it will
+                  speak a summary and show a detailed breakdown here.
+                </p>
+              </div>
+            ) : (
+              <div className="formatted-content-list">
+                {formattedContents.map((fc) => (
+                  <div key={fc.id} className="formatted-content-card">
+                    <div className="fc-card-head">
+                      <span className="fc-type-badge">
+                        {fc.contentType === "menu" && "🍽️"}
+                        {fc.contentType === "document" && "📃"}
+                        {fc.contentType === "form" && "📝"}
+                        {fc.contentType === "sign" && "🪧"}
+                        {fc.contentType === "table" && "📊"}
+                        {fc.contentType === "general" && "📄"}
+                        {" "}{fc.contentType}
+                      </span>
+                      <span className="fc-time">
+                        {new Date(fc.timestamp).toLocaleTimeString()}
+                      </span>
+                    </div>
+                    <p className="fc-title">{fc.title}</p>
+                    <div className="fc-markdown">
+                      <pre style={{ whiteSpace: "pre-wrap", fontFamily: "inherit", margin: 0 }}>
+                        {fc.markdown}
+                      </pre>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {formattedContents.length > 0 && (
+              <button
+                className="suggestion-clear"
+                onClick={() => setFormattedContents([])}
+              >
+                Clear all content
               </button>
             )}
           </section>

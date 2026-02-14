@@ -813,6 +813,76 @@
   background: #e6dfd0;
 }
 
+/* ─── Formatted Content Panel (Spot mode) ─── */
+.formatted-content-panel {
+  min-height: 0;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  padding: 0.56rem;
+  display: grid;
+  gap: 0.45rem;
+  grid-column: 1 / -1;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.formatted-content-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.formatted-content-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.52rem 0.56rem;
+  background: #faf7f0;
+  display: grid;
+  gap: 0.28rem;
+  animation: suggestion-slide-in 0.3s ease-out;
+  border-left: 3px solid #4a6fa8;
+}
+
+.fc-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.fc-type-badge {
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: "Cormorant Garamond", serif;
+  font-weight: 700;
+  color: #4a6fa8;
+}
+
+.fc-time {
+  font-size: 0.58rem;
+  color: var(--ink-muted);
+  font-family: "Cormorant Garamond", serif;
+}
+
+.fc-title {
+  margin: 0;
+  font-size: 0.84rem;
+  font-weight: 700;
+  font-family: "Cormorant Garamond", serif;
+  line-height: 1.2;
+}
+
+.fc-markdown {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.42rem 0.5rem;
+  background: #fbf8f2;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  overflow-x: auto;
+}
+
 @media (max-width: 1160px) {
   .top-rail {
     grid-template-columns: 1fr;
