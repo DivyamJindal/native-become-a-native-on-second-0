@@ -121,6 +121,16 @@ type ProactivityPolicy = {
   avoidNarrationSpam: boolean;
 };
 
+type UserLocation = {
+  latitude: number;
+  longitude: number;
+  city: string;
+  area: string;
+  state: string;
+  localTime: string;
+  fetchedAt: number;
+} | null;
+
 type PromptContext = {
   mode: NativeMode | null;
   sourceLanguage: LanguageChoice;
@@ -129,6 +139,7 @@ type PromptContext = {
   sceneContext: string;
   riskPolicy: RiskPolicy;
   proactivityPolicy: ProactivityPolicy;
+  userLocation: UserLocation;
 };
 
 type RiskSignal = {
@@ -615,6 +626,11 @@ function buildModeInstruction(
   return prompts[mode];
 }
 
+function buildLocationBlock(location: UserLocation): string {
+  if (!location) return "";
+  return `\nUSER LOCATION (live):\n- City/Area: ${location.area}, ${location.city}, ${location.state}\n- GPS: ${location.latitude.toFixed(5)}, ${location.longitude.toFixed(5)}\n- Local time: ${location.localTime}\n- IMPORTANT: Factor the user's location and local time into ALL responses. Use location for price comparisons, directions, local customs, safety context, nearby landmarks, and time-appropriate suggestions. If the user asks "where" or "how to get to", use their GPS as the starting point.`;
+}
+
 function buildSystemPrompt({
   mode,
   sourceLanguage,
@@ -623,6 +639,7 @@ function buildSystemPrompt({
   sceneContext,
   riskPolicy,
   proactivityPolicy,
+  userLocation,
 }: PromptContext) {
   const safetyLines = [
     safetyProfile.disallowMedicalLegalAdvice
@@ -636,6 +653,7 @@ function buildSystemPrompt({
     .join("\n");
 
   const riskTypes = riskPolicy.enabledTypes.join(", ");
+  const locationBlock = buildLocationBlock(userLocation);
 
   return `You are native, a realtime multimodal local companion for India.
 
@@ -661,7 +679,7 @@ LOCAL RISK GUARD:
 - For misinformation risk, flag contradictions and suspicious process instructions.
 - For urgency risk, flag pressure cues, fines, penalties, or emergency language.
 
-${safetyLines}
+${safetyLines}${locationBlock}
 
 LIVE CONTEXT:
 - Source language context: ${sourceLanguage.label}
@@ -755,6 +773,9 @@ function NativeConsole() {
     useState<LanguageChoice>(DEFAULT_TARGET_LANGUAGE);
   const [activeVoice, setActiveVoice] = useState<string>(VOICES[0]);
   const [searchEnabled, setSearchEnabled] = useState(true);
+  const [locationEnabled, setLocationEnabled] = useState(false);
+  const [userLocation, setUserLocation] = useState<UserLocation>(null);
+  const [locationLoading, setLocationLoading] = useState(false);
   const [selectedSceneId, setSelectedSceneId] = useState<string>(DEMO_SCENES[0].id);
   const [sceneContext, setSceneContext] = useState<string>(DEMO_SCENES[0].scriptHint);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -794,6 +815,89 @@ function NativeConsole() {
     [selectedSceneId],
   );
 
+  // Fetch location when toggle is turned on
+  useEffect(() => {
+    if (!locationEnabled) {
+      setUserLocation(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLocationLoading(true);
+
+    const fetchLocation = async () => {
+      try {
+        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 60000,
+          }),
+        );
+
+        const { latitude, longitude } = pos.coords;
+
+        // Reverse geocode with OpenStreetMap Nominatim (free, no key needed)
+        let city = "Unknown";
+        let area = "";
+        let state = "";
+        try {
+          const res = await fetch(
+            `https://nominatim.openstreetmap.org/reverse?lat=${latitude}&lon=${longitude}&format=json&accept-language=en`,
+            { headers: { "User-Agent": "native-app/1.0" } },
+          );
+          if (res.ok) {
+            const data = await res.json();
+            const addr = data.address || {};
+            city = addr.city || addr.town || addr.village || addr.county || "Unknown";
+            area = addr.suburb || addr.neighbourhood || addr.road || "";
+            state = addr.state || "";
+          }
+        } catch {
+          // Reverse geocode failed — GPS still usable
+        }
+
+        const localTime = new Date().toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          weekday: "long",
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+
+        if (!cancelled) {
+          setUserLocation({
+            latitude,
+            longitude,
+            city,
+            area,
+            state,
+            localTime,
+            fetchedAt: Date.now(),
+          });
+          setLocationLoading(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setLocationLoading(false);
+          setLocationEnabled(false);
+          setUserLocation(null);
+        }
+      }
+    };
+
+    void fetchLocation();
+
+    // Refresh location every 5 minutes while enabled
+    const intervalId = window.setInterval(() => void fetchLocation(), 300000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [locationEnabled]);
+
   const promptContext = useMemo<PromptContext>(
     () => ({
       mode: activeMode,
@@ -803,8 +907,9 @@ function NativeConsole() {
       sceneContext,
       riskPolicy: RISK_POLICY,
       proactivityPolicy: PROACTIVITY_POLICY,
+      userLocation: locationEnabled ? userLocation : null,
     }),
-    [activeMode, sourceLanguage, targetLanguage, sceneContext],
+    [activeMode, sourceLanguage, targetLanguage, sceneContext, locationEnabled, userLocation],
   );
 
   const sessionConfig = useMemo(
@@ -1609,6 +1714,19 @@ function NativeConsole() {
           >
             Risk Guard {riskGuardState.enabled ? "On" : "Off"}
           </button>
+
+          <button
+            className={cn("risk-toggle", { active: locationEnabled })}
+            onClick={() => setLocationEnabled((value) => !value)}
+            disabled={locationLoading}
+          >
+            📍 Location {locationLoading ? "..." : locationEnabled ? "On" : "Off"}
+          </button>
+          {locationEnabled && userLocation && (
+            <span className="location-status">
+              {userLocation.area ? `${userLocation.area}, ` : ""}{userLocation.city}
+            </span>
+          )}
         </div>
       </header>
 

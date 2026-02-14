@@ -193,6 +193,17 @@
   border-color: #1f1f1f;
 }
 
+.location-status {
+  font-size: 0.66rem;
+  color: var(--ink-muted);
+  font-family: "Noto Serif Devanagari", serif;
+  padding: 0.12rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f8f3e8;
+  white-space: nowrap;
+}
+
 .session-toggle.connected {
   background: #f4f0e7;
   color: var(--ink);
