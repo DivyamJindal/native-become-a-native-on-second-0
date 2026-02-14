@@ -34,14 +34,26 @@ export class AudioStreamer {
   public gainNode: GainNode;
   public source: AudioBufferSourceNode;
   private endOfQueueAudioSource: AudioBufferSourceNode | null = null;
+  private muted: boolean = false;
 
   public onComplete = () => {};
 
   constructor(public context: AudioContext) {
     this.gainNode = this.context.createGain();
     this.source = this.context.createBufferSource();
+    this.gainNode.gain.setValueAtTime(1, this.context.currentTime);
     this.gainNode.connect(this.context.destination);
     this.addPCM16 = this.addPCM16.bind(this);
+  }
+
+  setMuted(muted: boolean) {
+    this.muted = muted;
+    const value = muted ? 0 : 1;
+    this.gainNode.gain.cancelScheduledValues(this.context.currentTime);
+    this.gainNode.gain.linearRampToValueAtTime(
+      value,
+      this.context.currentTime + 0.05
+    );
   }
 
   async addWorklet<T extends (d: any) => void>(
@@ -231,6 +243,10 @@ export class AudioStreamer {
     setTimeout(() => {
       this.gainNode.disconnect();
       this.gainNode = this.context.createGain();
+      this.gainNode.gain.setValueAtTime(
+        this.muted ? 0 : 1,
+        this.context.currentTime
+      );
       this.gainNode.connect(this.context.destination);
     }, 200);
   }
@@ -241,7 +257,10 @@ export class AudioStreamer {
     }
     this.isStreamComplete = false;
     this.scheduledTime = this.context.currentTime + this.initialBufferTime;
-    this.gainNode.gain.setValueAtTime(1, this.context.currentTime);
+    this.gainNode.gain.setValueAtTime(
+      this.muted ? 0 : 1,
+      this.context.currentTime
+    );
   }
 
   complete() {

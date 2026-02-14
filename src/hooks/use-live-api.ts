@@ -28,6 +28,7 @@ export type UseLiveAPIResults = {
   config: LiveConnectConfig;
   model: string;
   setModel: (model: string) => void;
+  setOutputMuted: (muted: boolean) => void;
   connected: boolean;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
@@ -64,6 +65,7 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
 
   useEffect(() => {
     const onOpen = () => {
+      void audioStreamerRef.current?.resume();
       setConnected(true);
     };
 
@@ -76,15 +78,20 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
     };
 
     const stopAudioStreamer = () => audioStreamerRef.current?.stop();
+    const completeAudioTurn = () => audioStreamerRef.current?.complete();
+    const onInterrupted = () => audioStreamerRef.current?.complete();
 
-    const onAudio = (data: ArrayBuffer) =>
+    const onAudio = (data: ArrayBuffer) => {
+      void audioStreamerRef.current?.resume();
       audioStreamerRef.current?.addPCM16(new Uint8Array(data));
+    };
 
     client
       .on("error", onError)
       .on("open", onOpen)
       .on("close", onClose)
-      .on("interrupted", stopAudioStreamer)
+      .on("turncomplete", completeAudioTurn)
+      .on("interrupted", onInterrupted)
       .on("audio", onAudio);
 
     return () => {
@@ -92,9 +99,11 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
         .off("error", onError)
         .off("open", onOpen)
         .off("close", onClose)
-        .off("interrupted", stopAudioStreamer)
+        .off("turncomplete", completeAudioTurn)
+        .off("interrupted", onInterrupted)
         .off("audio", onAudio)
         .disconnect();
+      stopAudioStreamer();
     };
   }, [client]);
 
@@ -111,12 +120,17 @@ export function useLiveAPI(options: LiveClientOptions): UseLiveAPIResults {
     setConnected(false);
   }, [setConnected, client]);
 
+  const setOutputMuted = useCallback((muted: boolean) => {
+    audioStreamerRef.current?.setMuted(muted);
+  }, []);
+
   return {
     client,
     config,
     setConfig,
     model,
     setModel,
+    setOutputMuted,
     connected,
     connect,
     disconnect,

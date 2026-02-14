@@ -7,12 +7,16 @@ import {
   useState,
 } from "react";
 import {
+  ActivityHandling,
+  EndSensitivity,
   FunctionDeclaration,
   LiveConnectConfig,
   LiveServerContent,
   LiveServerToolCall,
   Modality,
+  StartSensitivity,
   Tool,
+  TurnCoverage,
   Type,
 } from "@google/genai";
 import cn from "classnames";
@@ -38,15 +42,29 @@ const MODEL_NAME =
 
 const RISK_FUNCTION_NAME = "emit_risk_signal";
 
-type NativeMode = "SPOT" | "ECHO" | "GUIDE" | "BRIDGE";
 type PermissionFlag = "unknown" | "granted" | "denied" | "prompt";
 type RiskType = "price" | "misinformation" | "urgency";
 type RiskLevel = "low" | "medium" | "high";
+export type AutoIntent =
+  | "announcement"
+  | "commute_help"
+  | "conversation"
+  | "risk_alert"
+  | "unknown";
+type SpeechHealth = "audio_streaming" | "fallback_tts" | "silent";
+type GroundingAction = "fare_check" | "rule_check" | "station_help";
 
 type LanguageChoice = {
   id: string;
   label: string;
   display: string;
+};
+
+type DetectedLanguage = {
+  id: string;
+  label: string;
+  confidence: number;
+  source: "script" | "keyword" | "fallback";
 };
 
 type TranscriptEntry = {
@@ -58,17 +76,6 @@ type TranscriptEntry = {
 type SafetyProfile = {
   disallowMedicalLegalAdvice: boolean;
   explainOfficialInstructionsOnly: boolean;
-};
-
-type DemoScene = {
-  id: string;
-  label: string;
-  mode: NativeMode;
-  sourceLanguage: string;
-  targetLanguage: string;
-  requiresSearch: boolean;
-  requiresVision: boolean;
-  scriptHint: string;
 };
 
 type SessionHealth = {
@@ -86,23 +93,12 @@ type RiskPolicy = {
   minConfidenceForMedium: number;
   minConfidenceForHigh: number;
   cooldownMs: number;
-  useSearchForPriceBaseline: boolean;
-};
-
-type ProactivityPolicy = {
-  style: "contextual-assist";
-  speakOnlyOnHighConfidenceRisk: boolean;
-  avoidNarrationSpam: boolean;
 };
 
 type PromptContext = {
-  mode: NativeMode | null;
-  sourceLanguage: LanguageChoice;
-  targetLanguage: LanguageChoice;
+  homeLanguage: LanguageChoice;
+  autoIntent: AutoIntent;
   safetyProfile: SafetyProfile;
-  sceneContext: string;
-  riskPolicy: RiskPolicy;
-  proactivityPolicy: ProactivityPolicy;
 };
 
 type RiskSignal = {
@@ -126,29 +122,12 @@ type RiskGuardState = {
   history: RiskSignal[];
 };
 
-// Architecture hooks for future Blind Mode implementation.
-export type BlindInsight = {
-  id: string;
-  summary: string;
-  confidence: number;
-  timestamp: string;
-};
-
-export type NavigationCue = {
-  direction: string;
-  hazard: string;
+export type ResponseCard = {
+  heard: string;
+  meaning: string;
   action: string;
+  raw: string;
 };
-
-export type ConversationSafetyCue = {
-  cue: string;
-  riskType: "ripoff" | "misleading" | "urgency";
-  recommendation: string;
-};
-
-const FEATURE_FLAGS = {
-  blindMode: false,
-} as const;
 
 const RISK_LEVEL_PRIORITY: Record<RiskLevel, number> = {
   low: 1,
@@ -210,25 +189,6 @@ const LANGUAGES: LanguageChoice[] = [
 
 const VOICES = ["Kore", "Aoede", "Puck", "Charon"];
 
-const MODE_DETAILS: Record<NativeMode, { title: string; blurb: string }> = {
-  SPOT: {
-    title: "Spot",
-    blurb: "Camera-first local reading and translation.",
-  },
-  ECHO: {
-    title: "Echo",
-    blurb: "Ambient listening with live translation.",
-  },
-  GUIDE: {
-    title: "Guide",
-    blurb: "What you see + what you ask + live grounding.",
-  },
-  BRIDGE: {
-    title: "Bridge",
-    blurb: "Two-way live conversation interpreter.",
-  },
-};
-
 const SAFETY_PROFILE: SafetyProfile = {
   disallowMedicalLegalAdvice: true,
   explainOfficialInstructionsOnly: true,
@@ -239,68 +199,24 @@ const RISK_POLICY: RiskPolicy = {
   minConfidenceForMedium: 0.62,
   minConfidenceForHigh: 0.78,
   cooldownMs: 18000,
-  useSearchForPriceBaseline: true,
 };
 
-const PROACTIVITY_POLICY: ProactivityPolicy = {
-  style: "contextual-assist",
-  speakOnlyOnHighConfidenceRisk: true,
-  avoidNarrationSpam: true,
-};
+const LANGUAGE_BY_ID = LANGUAGES.reduce<Record<string, LanguageChoice>>((map, language) => {
+  map[language.id] = language;
+  return map;
+}, {});
 
-const DEMO_SCENES: DemoScene[] = [
-  {
-    id: "scene-a-guide",
-    label: "Scene A: Form Help",
-    mode: "GUIDE",
-    sourceLanguage: "kn-IN",
-    targetLanguage: "hi-IN",
-    requiresSearch: true,
-    requiresVision: true,
-    scriptHint:
-      "Guide mode: catch misinformation risk while explaining a government form. Ask: 'Yeh form kaise bharein? Mujhe kya chahiye?'",
-  },
-  {
-    id: "scene-b-echo",
-    label: "Scene B: Announcement",
-    mode: "ECHO",
-    sourceLanguage: "kn-IN",
-    targetLanguage: "hi-IN",
-    requiresSearch: false,
-    requiresVision: false,
-    scriptHint:
-      "Echo mode: extract urgency from a Kannada announcement and output clean Hindi translation with action cue.",
-  },
-  {
-    id: "scene-c-bridge",
-    label: "Scene C: Conversation",
-    mode: "BRIDGE",
-    sourceLanguage: "hi-IN",
-    targetLanguage: "kn-IN",
-    requiresSearch: false,
-    requiresVision: false,
-    scriptHint:
-      "Bridge mode: Hindi <-> Kannada conversation with possible rip-off/overcharge cue detection.",
-  },
-];
-
-const LANGUAGE_BY_ID = LANGUAGES.reduce<Record<string, LanguageChoice>>(
-  (map, language) => {
-    map[language.id] = language;
-    return map;
-  },
-  {},
-);
-
-const DEFAULT_TARGET_LANGUAGE =
+const DEFAULT_HOME_LANGUAGE =
   LANGUAGE_BY_ID[process.env.REACT_APP_DEFAULT_TARGET_LANG || ""] ||
   LANGUAGE_BY_ID["hi-IN"] ||
   LANGUAGES[0];
 
-const DEFAULT_SOURCE_LANGUAGE =
-  LANGUAGE_BY_ID[process.env.REACT_APP_DEFAULT_SOURCE_LANG || ""] ||
-  LANGUAGE_BY_ID["kn-IN"] ||
-  LANGUAGES[0];
+const EMPTY_RESPONSE_CARD: ResponseCard = {
+  heard: "",
+  meaning: "",
+  action: "",
+  raw: "",
+};
 
 function getLanguage(id: string, fallback: LanguageChoice) {
   return LANGUAGE_BY_ID[id] || fallback;
@@ -349,8 +265,8 @@ function parseRiskType(raw: unknown): RiskType | null {
 
 function parseRiskSignalFromArgs(
   args: Record<string, unknown> | undefined,
-  sourceLanguage: LanguageChoice,
-  targetLanguage: LanguageChoice,
+  sourceLanguage: string,
+  targetLanguage: string,
 ): RiskSignal | null {
   if (!args) {
     return null;
@@ -376,18 +292,67 @@ function parseRiskSignalFromArgs(
     reason,
     action,
     confidence,
-    sourceLanguage: sourceLanguage.id,
-    targetLanguage: targetLanguage.id,
+    sourceLanguage,
+    targetLanguage,
     timestamp: new Date().toISOString(),
     baselineReference: baselineReference || undefined,
     source: "model",
   };
 }
 
+function countKeywordHits(text: string, keywords: string[]) {
+  let hits = 0;
+  for (const keyword of keywords) {
+    if (text.includes(keyword)) {
+      hits += 1;
+    }
+  }
+  return hits;
+}
+
+function extractLineValue(raw: string, label: string) {
+  const expression = new RegExp(
+    `(?:^|\\n)\\s*(?:[-*]\\s*)?(?:\\*\\*)?${label}(?:\\*\\*)?\\s*[:：-]\\s*(.+)`,
+    "i",
+  );
+  const match = raw.match(expression);
+  return match?.[1]?.trim() || "";
+}
+
+function cleanForSpeech(text: string) {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/[>*_#-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function parseResponseCard(raw: string, heardFallback: string): ResponseCard {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return EMPTY_RESPONSE_CARD;
+  }
+
+  const heard = extractLineValue(trimmed, "Heard") || heardFallback || "";
+  const meaning =
+    extractLineValue(trimmed, "Meaning") ||
+    trimmed.split("\n").map((line) => line.trim()).filter(Boolean)[0] ||
+    "";
+  const action = extractLineValue(trimmed, "What to do now") || "";
+
+  return {
+    heard,
+    meaning,
+    action,
+    raw: trimmed,
+  };
+}
+
 function detectHeuristicRisk(
   transcript: string,
-  sourceLanguage: LanguageChoice,
-  targetLanguage: LanguageChoice,
+  sourceLanguageId: string,
+  targetLanguageId: string,
 ): RiskSignal | null {
   const text = transcript.trim();
   if (!text) {
@@ -402,8 +367,8 @@ function detectHeuristicRisk(
     "fine",
     "penalty",
     "police",
-    "last warning",
     "deadline",
+    "last warning",
     "jaldi",
     "tatkal",
     "ತಕ್ಷಣ",
@@ -421,20 +386,48 @@ function detectHeuristicRisk(
     "broker",
   ];
 
+  const scamPressureKeywords = [
+    "pay now",
+    "cash only",
+    "or police",
+    "double fare",
+    "special fee",
+    "agent fee",
+    "service fee now",
+    "right now or",
+    "last chance pay",
+  ];
+
   const priceHints = /(₹|rs\.?|rupees|fare|charge|fees|price|rate|cost|ticket|rent)/i;
   const highAmount = /\b([5-9]\d{2}|\d{4,})\b/;
+
+  if (scamPressureKeywords.some((keyword) => lower.includes(keyword))) {
+    return {
+      id: createRiskId(),
+      type: "urgency",
+      level: "high",
+      cue: text.slice(0, 120),
+      reason: "Possible coercive payment pressure detected.",
+      action: "Do not pay yet. Ask for official ID and verify at station counter.",
+      confidence: 0.81,
+      sourceLanguage: sourceLanguageId,
+      targetLanguage: targetLanguageId,
+      timestamp: new Date().toISOString(),
+      source: "heuristic",
+    };
+  }
 
   if (urgencyKeywords.some((keyword) => lower.includes(keyword))) {
     return {
       id: createRiskId(),
       type: "urgency",
       level: "medium",
-      cue: text.slice(0, 110),
+      cue: text.slice(0, 120),
       reason: "Urgent enforcement or deadline language detected.",
-      action: "Pause, verify with official staff/signage before acting.",
-      confidence: 0.66,
-      sourceLanguage: sourceLanguage.id,
-      targetLanguage: targetLanguage.id,
+      action: "Pause and verify with official signage or staff before acting.",
+      confidence: 0.67,
+      sourceLanguage: sourceLanguageId,
+      targetLanguage: targetLanguageId,
       timestamp: new Date().toISOString(),
       source: "heuristic",
     };
@@ -445,12 +438,12 @@ function detectHeuristicRisk(
       id: createRiskId(),
       type: "misinformation",
       level: "medium",
-      cue: text.slice(0, 110),
+      cue: text.slice(0, 120),
       reason: "Potential misleading instruction pattern detected.",
-      action: "Ask for written proof and confirm at official counter.",
-      confidence: 0.64,
-      sourceLanguage: sourceLanguage.id,
-      targetLanguage: targetLanguage.id,
+      action: "Confirm process at official help desk before submitting payment/docs.",
+      confidence: 0.65,
+      sourceLanguage: sourceLanguageId,
+      targetLanguage: targetLanguageId,
       timestamp: new Date().toISOString(),
       source: "heuristic",
     };
@@ -461,14 +454,14 @@ function detectHeuristicRisk(
       id: createRiskId(),
       type: "price",
       level: "low",
-      cue: text.slice(0, 110),
+      cue: text.slice(0, 120),
       reason: "Price mention detected. Overcharge check recommended.",
-      action: "Ask for printed rate list or compare with known local fare.",
-      confidence: 0.56,
-      sourceLanguage: sourceLanguage.id,
-      targetLanguage: targetLanguage.id,
+      action: "Ask for fare chart/receipt or verify via Fare Check.",
+      confidence: 0.57,
+      sourceLanguage: sourceLanguageId,
+      targetLanguage: targetLanguageId,
       timestamp: new Date().toISOString(),
-      baselineReference: "Context estimate; confirm using local posted rates.",
+      baselineReference: "Context estimate; confirm using official posted rates.",
       source: "heuristic",
     };
   }
@@ -476,90 +469,226 @@ function detectHeuristicRisk(
   return null;
 }
 
-function buildModeInstruction(
-  mode: NativeMode | null,
-  sourceLanguage: LanguageChoice,
-  targetLanguage: LanguageChoice,
-) {
-  if (!mode) {
-    return `CURRENT MODE: STANDBY\nOnly respond when asked. Keep output concise and in ${targetLanguage.label}.`;
+export function detectIncomingLanguage(
+  transcript: string,
+  fallbackLanguage: LanguageChoice,
+): DetectedLanguage | null {
+  const text = transcript.trim();
+  if (!text) {
+    return null;
   }
 
-  const prompts: Record<NativeMode, string> = {
-    SPOT: `CURRENT MODE: SPOT\nFocus on camera input. Proactively read visible text and explain what user should do next in ${targetLanguage.label}.`,
-    ECHO: `CURRENT MODE: ECHO\nTranslate incoming speech into ${targetLanguage.label}. Output only translation. Preserve tone. Stay silent for non-speech/silence.`,
-    GUIDE: `CURRENT MODE: GUIDE\nUse what you see + what user asks + grounding when needed. Always end with Step 1, Step 2, Step 3 in ${targetLanguage.label}.`,
-    BRIDGE: `CURRENT MODE: BRIDGE\nBidirectional interpretation. If speaker uses ${sourceLanguage.label}, translate to ${targetLanguage.label}; if speaker uses ${targetLanguage.label}, translate to ${sourceLanguage.label}. Output translation only.`,
-  };
+  if (/[\u0C80-\u0CFF]/.test(text)) {
+    return { id: "kn-IN", label: "Kannada", confidence: 0.96, source: "script" };
+  }
 
-  return prompts[mode];
+  if (/[\u0C00-\u0C7F]/.test(text)) {
+    return { id: "te-IN", label: "Telugu", confidence: 0.95, source: "script" };
+  }
+
+  if (/[\u0B80-\u0BFF]/.test(text)) {
+    return { id: "ta-IN", label: "Tamil", confidence: 0.95, source: "script" };
+  }
+
+  if (/[\u0980-\u09FF]/.test(text)) {
+    return { id: "bn-IN", label: "Bengali", confidence: 0.95, source: "script" };
+  }
+
+  if (/[\u0900-\u097F]/.test(text)) {
+    const marathiMarkers = ["आहे", "काय", "तुम्हाला", "पाहिजे", "करायचे", "झाले"];
+    const marathiHits = marathiMarkers.filter((marker) => text.includes(marker)).length;
+    return {
+      id: marathiHits >= 2 ? "mr-IN" : "hi-IN",
+      label: marathiHits >= 2 ? "Marathi" : "Hindi",
+      confidence: marathiHits >= 2 ? 0.82 : 0.78,
+      source: "script",
+    };
+  }
+
+  const lower = text.toLowerCase();
+  const englishHits = countKeywordHits(lower, [
+    "the",
+    "please",
+    "where",
+    "how",
+    "help",
+    "station",
+    "ticket",
+    "price",
+    "platform",
+    "metro",
+  ]);
+  const hindiRomanHits = countKeywordHits(lower, [
+    "kya",
+    "kaise",
+    "kitna",
+    "jaldi",
+    "nahi",
+    "haan",
+    "bhai",
+    "paisa",
+    "madad",
+    "kahan",
+  ]);
+  const kannadaRomanHits = countKeywordHits(lower, [
+    "elli",
+    "beku",
+    "swalpa",
+    "banni",
+    "illa",
+    "yaake",
+    "hogi",
+    "anna",
+  ]);
+
+  if (englishHits >= 2 && englishHits > hindiRomanHits && englishHits > kannadaRomanHits) {
+    return { id: "en-IN", label: "English", confidence: 0.63, source: "keyword" };
+  }
+
+  if (hindiRomanHits >= 2 && hindiRomanHits >= kannadaRomanHits) {
+    return { id: "hi-IN", label: "Hindi", confidence: 0.59, source: "keyword" };
+  }
+
+  if (kannadaRomanHits >= 2) {
+    return { id: "kn-IN", label: "Kannada", confidence: 0.58, source: "keyword" };
+  }
+
+  return {
+    id: fallbackLanguage.id,
+    label: fallbackLanguage.label,
+    confidence: 0.36,
+    source: "fallback",
+  };
 }
 
-function buildSystemPrompt({
-  mode,
-  sourceLanguage,
-  targetLanguage,
-  safetyProfile,
-  sceneContext,
-  riskPolicy,
-  proactivityPolicy,
-}: PromptContext) {
+export function classifyAutoIntent(
+  transcript: string,
+  visionEnabled: boolean = false,
+): AutoIntent {
+  const text = transcript.trim().toLowerCase();
+  if (!text) {
+    return visionEnabled ? "commute_help" : "unknown";
+  }
+
+  const announcementKeywords = [
+    "platform",
+    "arriving",
+    "departing",
+    "next station",
+    "train",
+    "metro",
+    "coach",
+    "announcement",
+    "bus stop",
+    "gate number",
+  ];
+
+  const commuteHelpKeywords = [
+    "ticket",
+    "route",
+    "where should i go",
+    "which bus",
+    "which train",
+    "station",
+    "counter",
+    "line",
+    "queue",
+    "map",
+  ];
+
+  const riskKeywords = [
+    "pay now",
+    "fine",
+    "penalty",
+    "agent",
+    "double fare",
+    "cash only",
+    "urgent",
+    "police",
+    "shortcut",
+  ];
+
+  if (announcementKeywords.some((keyword) => text.includes(keyword))) {
+    return "announcement";
+  }
+
+  if (riskKeywords.some((keyword) => text.includes(keyword))) {
+    return "risk_alert";
+  }
+
+  if (commuteHelpKeywords.some((keyword) => text.includes(keyword))) {
+    return "commute_help";
+  }
+
+  return "conversation";
+}
+
+export function shouldTranslate(
+  detectedLanguageId: string | null,
+  homeLanguageId: string,
+): boolean {
+  if (!detectedLanguageId) {
+    return true;
+  }
+  return detectedLanguageId !== homeLanguageId;
+}
+
+function buildSystemPrompt({ homeLanguage, autoIntent, safetyProfile }: PromptContext) {
   const safetyLines = [
     safetyProfile.disallowMedicalLegalAdvice
       ? "SAFETY: Never provide medical or legal diagnosis, prescriptions, verdicts, or legal strategy."
       : "",
     safetyProfile.explainOfficialInstructionsOnly
-      ? "SAFETY: You may translate and explain official instructions from documents, notices, staff announcements, and forms in plain language."
+      ? "SAFETY: You may translate and explain official instructions from documents, announcements, forms, and staff communication in plain language."
       : "",
   ]
     .filter(Boolean)
     .join("\n");
 
-  const riskTypes = riskPolicy.enabledTypes.join(", ");
+  return `You are native, a realtime commute copilot for newcomers in India.
 
-  return `You are native, a realtime multimodal local companion for India.
+PRIMARY USE CASE:
+- Help users handle station/bus/metro announcements, transit instructions, fare confusion, and risky pressure situations.
 
-MISSION:
-Help internal migrants become local faster by combining seeing, hearing, grounding, and practical next actions.
+RESPONSE CONTRACT:
+- Always respond in ${homeLanguage.label} (${homeLanguage.display}) unless user explicitly requests another language.
+- Keep response concise and practical.
+- Use markdown bullets exactly in this shape for important outputs:
+  - Heard: ...
+  - Meaning: ...
+  - What to do now: ...
+- Do not produce verbose chain-of-thought or meta commentary.
 
-CORE RULES:
-- Preferred output is ${targetLanguage.label} (${targetLanguage.display}), unless BRIDGE mode requires opposite direction.
-- Keep outputs short, practical, and actionable.
-- Avoid filler narration.
+TRANSLATION POLICY:
+- Auto-detect incoming language from user speech and visible text.
+- If detected language differs from home language, translate meaning into home language.
+- If detected language equals home language, avoid redundant translation and provide concise interpretation/action.
+- Still speak concise output in both cases.
 
-${buildModeInstruction(mode, sourceLanguage, targetLanguage)}
+INTENT CONTEXT:
+- Current detected context: ${autoIntent}.
+- If context is announcement, prioritize urgency and next movement guidance.
+- If context is commute_help, prioritize route/queue/counter instructions.
+- If context is risk_alert, prioritize safety verification and refusal scripts.
 
-PROACTIVITY POLICY:
-- Style: ${proactivityPolicy.style}
-- Speak proactively only when confidence is high for meaningful risk or user asks explicitly.
-- Avoid narration spam during silence or low-signal context.
+GROUNDING POLICY:
+- You may use web grounding only when the user message includes a token like [GROUNDING_ACTION:...].
+- If grounding token is absent, do not use search.
 
 LOCAL RISK GUARD:
-- Watch for risk types: ${riskTypes}
-- If actionable risk is detected, call function ${RISK_FUNCTION_NAME} with cue, reason, one-line action, level, and confidence.
-- For price risk, compare stated amount with context and grounding when available.
-- For misinformation risk, flag contradictions and suspicious process instructions.
-- For urgency risk, flag pressure cues, fines, penalties, or emergency language.
+- If actionable risk is detected, call ${RISK_FUNCTION_NAME} with type, level, cue, reason, action, and confidence.
+- Risk types: price, misinformation, urgency.
+- Scam pressure cues include coercive payment demands, fake penalty pressure, or agent shortcuts.
 
-${safetyLines}
-
-LIVE CONTEXT:
-- Source language context: ${sourceLanguage.label}
-- Target language context: ${targetLanguage.label}
-- Current scene focus: ${sceneContext || "General exploration"}`;
+${safetyLines}`;
 }
 
 function buildConfig(
   promptContext: PromptContext,
   voiceName: string,
-  searchEnabled: boolean,
   riskGuardEnabled: boolean,
 ): LiveConnectConfig {
-  const tools: Tool[] = [];
-
-  if (promptContext.mode === "GUIDE" && searchEnabled) {
-    tools.push({ googleSearch: {} });
-  }
+  const tools: Tool[] = [{ googleSearch: {} }];
 
   if (riskGuardEnabled) {
     tools.push({ functionDeclarations: [RISK_FUNCTION_DECLARATION] });
@@ -572,6 +701,16 @@ function buildConfig(
         prebuiltVoiceConfig: {
           voiceName,
         },
+      },
+    },
+    realtimeInputConfig: {
+      activityHandling: ActivityHandling.NO_INTERRUPTION,
+      turnCoverage: TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
+      automaticActivityDetection: {
+        startOfSpeechSensitivity: StartSensitivity.START_SENSITIVITY_HIGH,
+        endOfSpeechSensitivity: EndSensitivity.END_SENSITIVITY_LOW,
+        prefixPaddingMs: 240,
+        silenceDurationMs: 900,
       },
     },
     systemInstruction: {
@@ -592,19 +731,17 @@ function NativeConsole() {
     misinformation: 0,
     urgency: 0,
   });
+  const fallbackTimerRef = useRef<number | null>(null);
+  const lastAudioPacketAtRef = useRef<number>(0);
+  const lastTtsAtRef = useRef<number>(0);
+  const lastFallbackTextRef = useRef<string>("");
+  const intentContextRef = useRef<AutoIntent>("unknown");
 
   const webcam = useWebcam();
   const screenCapture = useScreenCapture();
 
-  const [activeMode, setActiveMode] = useState<NativeMode | null>("SPOT");
-  const [sourceLanguage, setSourceLanguage] =
-    useState<LanguageChoice>(DEFAULT_SOURCE_LANGUAGE);
-  const [targetLanguage, setTargetLanguage] =
-    useState<LanguageChoice>(DEFAULT_TARGET_LANGUAGE);
+  const [homeLanguage, setHomeLanguage] = useState<LanguageChoice>(DEFAULT_HOME_LANGUAGE);
   const [activeVoice, setActiveVoice] = useState<string>(VOICES[0]);
-  const [searchEnabled, setSearchEnabled] = useState(true);
-  const [selectedSceneId, setSelectedSceneId] = useState<string>(DEMO_SCENES[0].id);
-  const [sceneContext, setSceneContext] = useState<string>(DEMO_SCENES[0].scriptHint);
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [micEnabled, setMicEnabled] = useState(false);
@@ -612,13 +749,20 @@ function NativeConsole() {
   const [visualSource, setVisualSource] = useState<"camera" | "screen">("camera");
   const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
 
-  const [riskGuardEnabled, setRiskGuardEnabled] = useState(true);
+  const [riskGuardEnabled, setRiskGuardEnabled] = useState(false);
   const [currentRisk, setCurrentRisk] = useState<RiskSignal | null>(null);
   const [riskHistory, setRiskHistory] = useState<RiskSignal[]>([]);
 
   const [inputDraft, setInputDraft] = useState("");
   const [lastInputTranscript, setLastInputTranscript] = useState("");
   const [lastOutputTranscript, setLastOutputTranscript] = useState("");
+  const [detectedIncomingLanguage, setDetectedIncomingLanguage] =
+    useState<DetectedLanguage | null>(null);
+  const [autoIntent, setAutoIntent] = useState<AutoIntent>("unknown");
+  const [responseCard, setResponseCard] = useState<ResponseCard>(EMPTY_RESPONSE_CARD);
+  const [speechHealth, setSpeechHealth] = useState<SpeechHealth>("silent");
+  const [activeGroundingAction, setActiveGroundingAction] =
+    useState<GroundingAction | null>(null);
   const [entries, setEntries] = useState<TranscriptEntry[]>([]);
 
   const [sessionHealth, setSessionHealth] = useState<SessionHealth>({
@@ -633,30 +777,29 @@ function NativeConsole() {
   const { client, connected, connect, disconnect, volume, setConfig, setModel } =
     useLiveAPIContext();
 
-  const activeScene = useMemo(
-    () => DEMO_SCENES.find((scene) => scene.id === selectedSceneId) || null,
-    [selectedSceneId],
-  );
-
   const promptContext = useMemo<PromptContext>(
     () => ({
-      mode: activeMode,
-      sourceLanguage,
-      targetLanguage,
+      homeLanguage,
+      autoIntent,
       safetyProfile: SAFETY_PROFILE,
-      sceneContext,
-      riskPolicy: RISK_POLICY,
-      proactivityPolicy: PROACTIVITY_POLICY,
     }),
-    [activeMode, sourceLanguage, targetLanguage, sceneContext],
+    [autoIntent, homeLanguage],
   );
 
   const sessionConfig = useMemo(
-    () => buildConfig(promptContext, activeVoice, searchEnabled, riskGuardEnabled),
-    [promptContext, activeVoice, searchEnabled, riskGuardEnabled],
+    () => buildConfig(promptContext, activeVoice, riskGuardEnabled),
+    [promptContext, activeVoice, riskGuardEnabled],
   );
 
-  const sessionSignature = useMemo(() => JSON.stringify(sessionConfig), [sessionConfig]);
+  const reconnectSignature = useMemo(
+    () =>
+      JSON.stringify({
+        homeLanguage: homeLanguage.id,
+        voice: activeVoice,
+        riskGuardEnabled,
+      }),
+    [homeLanguage.id, activeVoice, riskGuardEnabled],
+  );
 
   const riskGuardState = useMemo<RiskGuardState>(
     () => ({
@@ -667,6 +810,11 @@ function NativeConsole() {
     [riskGuardEnabled, currentRisk, riskHistory],
   );
 
+  const translationRequired = useMemo(
+    () => shouldTranslate(detectedIncomingLanguage?.id || null, homeLanguage.id),
+    [detectedIncomingLanguage, homeLanguage.id],
+  );
+
   const setLastError = useCallback((message: string | null) => {
     setSessionHealth((previous) => ({
       ...previous,
@@ -674,18 +822,15 @@ function NativeConsole() {
     }));
   }, []);
 
-  const setPermission = useCallback(
-    (kind: "mic" | "vision", value: PermissionFlag) => {
-      setSessionHealth((previous) => ({
-        ...previous,
-        permissions: {
-          ...previous.permissions,
-          [kind]: value,
-        },
-      }));
-    },
-    [],
-  );
+  const setPermission = useCallback((kind: "mic" | "vision", value: PermissionFlag) => {
+    setSessionHealth((previous) => ({
+      ...previous,
+      permissions: {
+        ...previous.permissions,
+        [kind]: value,
+      },
+    }));
+  }, []);
 
   const setReconnecting = useCallback((value: boolean) => {
     setSessionHealth((previous) => ({
@@ -753,21 +898,69 @@ function NativeConsole() {
   );
 
   const maybeApplyHeuristicRisk = useCallback(
-    (transcript: string) => {
+    (transcript: string, sourceLanguageId: string) => {
       if (!riskGuardEnabled) {
         return;
       }
+
       const heuristicSignal = detectHeuristicRisk(
         transcript,
-        sourceLanguage,
-        targetLanguage,
+        sourceLanguageId,
+        homeLanguage.id,
       );
-      if (!heuristicSignal) {
+
+      if (heuristicSignal) {
+        void applyRiskSignal(heuristicSignal);
+      }
+    },
+    [applyRiskSignal, homeLanguage.id, riskGuardEnabled],
+  );
+
+  const setIntentFromTranscript = useCallback(
+    (transcript: string) => {
+      const nextIntent = classifyAutoIntent(transcript, visionEnabled);
+      setAutoIntent((previous) => (previous === nextIntent ? previous : nextIntent));
+    },
+    [visionEnabled],
+  );
+
+  const scheduleFallbackSpeech = useCallback(
+    (text: string) => {
+      if (!text.trim()) {
         return;
       }
-      void applyRiskSignal(heuristicSignal);
+
+      if (fallbackTimerRef.current) {
+        window.clearTimeout(fallbackTimerRef.current);
+      }
+
+      fallbackTimerRef.current = window.setTimeout(() => {
+        const now = Date.now();
+        const noRecentAudio = now - lastAudioPacketAtRef.current > 850;
+        const speechSynth = typeof window !== "undefined" ? window.speechSynthesis : null;
+        if (!noRecentAudio || !speechSynth || !text.trim()) {
+          return;
+        }
+
+        const speakText = cleanForSpeech(text);
+        if (!speakText || speakText === lastFallbackTextRef.current) {
+          return;
+        }
+
+        lastFallbackTextRef.current = speakText;
+        speechSynth.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(speakText);
+        utterance.lang = homeLanguage.id;
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        speechSynth.speak(utterance);
+
+        lastTtsAtRef.current = Date.now();
+        setSpeechHealth("fallback_tts");
+      }, 900);
     },
-    [applyRiskSignal, riskGuardEnabled, sourceLanguage, targetLanguage],
+    [homeLanguage.id],
   );
 
   useEffect(() => {
@@ -792,6 +985,68 @@ function NativeConsole() {
       client.off("error", onError);
     };
   }, [client, setLastError]);
+
+  useEffect(() => {
+    const onAudioPacket = () => {
+      lastAudioPacketAtRef.current = Date.now();
+      setSpeechHealth("audio_streaming");
+      if (fallbackTimerRef.current) {
+        window.clearTimeout(fallbackTimerRef.current);
+        fallbackTimerRef.current = null;
+      }
+    };
+
+    client.on("audio", onAudioPacket);
+    return () => {
+      client.off("audio", onAudioPacket);
+    };
+  }, [client]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      const lastSpokenAt = Math.max(lastAudioPacketAtRef.current, lastTtsAtRef.current);
+      if (!lastSpokenAt) {
+        return;
+      }
+      if (Date.now() - lastSpokenAt > 5000) {
+        setSpeechHealth("silent");
+      }
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (fallbackTimerRef.current) {
+        window.clearTimeout(fallbackTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!connected) {
+      return;
+    }
+
+    if (intentContextRef.current === autoIntent) {
+      return;
+    }
+
+    intentContextRef.current = autoIntent;
+    client.send(
+      [
+        {
+          text:
+            `[INTENT_CONTEXT:${autoIntent}] Treat this as runtime context. ` +
+            "Do not explicitly mention this token.",
+        },
+      ],
+      false,
+    );
+  }, [autoIntent, client, connected]);
 
   useEffect(() => {
     if (!navigator.permissions?.query) {
@@ -827,14 +1082,14 @@ function NativeConsole() {
 
   useEffect(() => {
     if (!reconnectGuardRef.current) {
-      reconnectGuardRef.current = sessionSignature;
+      reconnectGuardRef.current = reconnectSignature;
       return;
     }
 
     const previous = reconnectGuardRef.current;
-    reconnectGuardRef.current = sessionSignature;
+    reconnectGuardRef.current = reconnectSignature;
 
-    if (!connected || previous === sessionSignature) {
+    if (!connected || previous === reconnectSignature) {
       return;
     }
 
@@ -862,7 +1117,7 @@ function NativeConsole() {
     return () => {
       cancelled = true;
     };
-  }, [sessionSignature, connected, connect, disconnect, setLastError, setReconnecting]);
+  }, [reconnectSignature, connected, connect, disconnect, setLastError, setReconnecting]);
 
   useEffect(() => {
     if (videoRef.current) {
@@ -894,10 +1149,7 @@ function NativeConsole() {
       }
       setMicEnabled(false);
       setLastError(
-        toErrorMessage(
-          error,
-          "Microphone permission is blocked. Enable it and retry.",
-        ),
+        toErrorMessage(error, "Microphone permission is blocked. Enable it and retry."),
       );
       return false;
     }
@@ -1052,8 +1304,8 @@ function NativeConsole() {
 
         const parsed = parseRiskSignalFromArgs(
           functionCall.args,
-          sourceLanguage,
-          targetLanguage,
+          detectedIncomingLanguage?.id || "auto",
+          homeLanguage.id,
         );
 
         if (!parsed) {
@@ -1092,42 +1344,71 @@ function NativeConsole() {
     return () => {
       client.off("toolcall", onToolCall);
     };
-  }, [
-    applyRiskSignal,
-    client,
-    riskGuardEnabled,
-    sourceLanguage,
-    targetLanguage,
-  ]);
+  }, [applyRiskSignal, client, detectedIncomingLanguage, homeLanguage.id, riskGuardEnabled]);
+
+  useEffect(() => {
+    const onTurnComplete = () => {
+      setActiveGroundingAction(null);
+    };
+
+    client.on("turncomplete", onTurnComplete);
+    return () => {
+      client.off("turncomplete", onTurnComplete);
+    };
+  }, [client]);
 
   useEffect(() => {
     const onContent = (content: LiveServerContent) => {
       if (content.inputTranscription?.text) {
-        setLastInputTranscript(content.inputTranscription.text);
-        maybeApplyHeuristicRisk(content.inputTranscription.text);
+        const inputText = content.inputTranscription.text;
+        setLastInputTranscript(inputText);
+
+        const detected = detectIncomingLanguage(inputText, homeLanguage);
+        if (detected) {
+          setDetectedIncomingLanguage(detected);
+          maybeApplyHeuristicRisk(inputText, detected.id);
+        } else {
+          maybeApplyHeuristicRisk(inputText, "auto");
+        }
+
+        setIntentFromTranscript(inputText);
       }
 
-      if (content.outputTranscription?.text) {
-        setLastOutputTranscript(content.outputTranscription.text);
-        maybeApplyHeuristicRisk(content.outputTranscription.text);
+      const outputTranscript = content.outputTranscription?.text?.trim() || "";
+      if (outputTranscript) {
+        setLastOutputTranscript(outputTranscript);
+        const cardFromTranscript = parseResponseCard(outputTranscript, lastInputTranscript);
+        setResponseCard((previous) => ({
+          ...previous,
+          meaning: cardFromTranscript.meaning || previous.meaning,
+          action: cardFromTranscript.action || previous.action,
+          raw: cardFromTranscript.raw || previous.raw,
+        }));
+        maybeApplyHeuristicRisk(outputTranscript, detectedIncomingLanguage?.id || "auto");
+        scheduleFallbackSpeech(outputTranscript);
       }
 
-      const text =
+      const modelText =
         content.modelTurn?.parts
           ?.map((part) => (typeof part.text === "string" ? part.text : ""))
           .join("\n")
           .trim() || "";
 
-      if (text) {
+      if (modelText) {
         setEntries((previous) => [
           {
             id: `${Date.now()}-${Math.random()}`,
             speaker: "native" as const,
-            text,
+            text: modelText,
           },
           ...previous,
         ].slice(0, 24));
-        maybeApplyHeuristicRisk(text);
+
+        const parsedCard = parseResponseCard(modelText, lastInputTranscript);
+        setResponseCard(parsedCard);
+        setLastOutputTranscript(parsedCard.meaning || modelText);
+        maybeApplyHeuristicRisk(modelText, detectedIncomingLanguage?.id || "auto");
+        scheduleFallbackSpeech(parsedCard.action || parsedCard.meaning || modelText);
       }
     };
 
@@ -1135,7 +1416,15 @@ function NativeConsole() {
     return () => {
       client.off("content", onContent);
     };
-  }, [client, maybeApplyHeuristicRisk]);
+  }, [
+    client,
+    detectedIncomingLanguage,
+    homeLanguage,
+    lastInputTranscript,
+    maybeApplyHeuristicRisk,
+    scheduleFallbackSpeech,
+    setIntentFromTranscript,
+  ]);
 
   const toggleConnection = useCallback(async () => {
     setLastError(null);
@@ -1197,40 +1486,39 @@ function NativeConsole() {
     [turnOnVision, visionEnabled],
   );
 
-  const applyScenePreset = useCallback(
-    async (sceneId: string): Promise<void> => {
-      const scene = DEMO_SCENES.find((item) => item.id === sceneId);
-      if (!scene) {
+  const logUserEntry = useCallback((text: string) => {
+    setEntries((previous) => [
+      {
+        id: `${Date.now()}-${Math.random()}`,
+        speaker: "you" as const,
+        text,
+      },
+      ...previous,
+    ].slice(0, 24));
+  }, []);
+
+  const runGroundingAction = useCallback(
+    (action: GroundingAction) => {
+      if (!connected) {
         return;
       }
 
-      setSelectedSceneId(scene.id);
-      setSceneContext(scene.scriptHint);
-      setActiveMode(scene.mode);
-      setSourceLanguage((current) => getLanguage(scene.sourceLanguage, current));
-      setTargetLanguage((current) => getLanguage(scene.targetLanguage, current));
-      setSearchEnabled(scene.requiresSearch);
-      setLastError(null);
+      setActiveGroundingAction(action);
 
-      if (!micEnabled) {
-        await enableMic();
-      }
+      const actionPrompts: Record<GroundingAction, string> = {
+        fare_check:
+          "[GROUNDING_ACTION:FARE_CHECK] Verify local fare/range for current route or station and return concise guidance.",
+        rule_check:
+          "[GROUNDING_ACTION:RULE_CHECK] Check latest station/transport rule relevant to current context and return concise guidance.",
+        station_help:
+          "[GROUNDING_ACTION:STATION_HELP] Fetch practical station help context for navigation, queue, and counter flow.",
+      };
 
-      if (scene.requiresVision) {
-        setVisualSource("camera");
-        await turnOnVision("camera");
-      } else if (visionEnabled) {
-        turnOffVision();
-      }
+      const prompt = actionPrompts[action];
+      client.send([{ text: prompt }]);
+      logUserEntry(prompt);
     },
-    [
-      enableMic,
-      micEnabled,
-      setLastError,
-      turnOffVision,
-      turnOnVision,
-      visionEnabled,
-    ],
+    [client, connected, logUserEntry],
   );
 
   const submitTextPrompt = useCallback(
@@ -1242,28 +1530,25 @@ function NativeConsole() {
       }
 
       client.send([{ text: trimmed }]);
-      setEntries((previous) => [
-        {
-          id: `${Date.now()}-${Math.random()}`,
-          speaker: "you" as const,
-          text: trimmed,
-        },
-        ...previous,
-      ].slice(0, 24));
+      logUserEntry(trimmed);
       setInputDraft("");
     },
-    [client, connected, inputDraft],
+    [client, connected, inputDraft, logUserEntry],
   );
 
   const liveStatuses = [
     { label: "Listening", active: connected && micEnabled },
     { label: "Seeing", active: connected && visionEnabled },
-    {
-      label: "Searching",
-      active: connected && activeMode === "GUIDE" && searchEnabled,
-    },
+    { label: "Grounding", active: connected && !!activeGroundingAction },
     { label: "Speaking", active: connected && volume > 0.05 },
   ];
+
+  const speechHealthLabel =
+    speechHealth === "audio_streaming"
+      ? "audio streaming"
+      : speechHealth === "fallback_tts"
+      ? "fallback tts"
+      : "silent";
 
   return (
     <div className="native-app">
@@ -1271,64 +1556,19 @@ function NativeConsole() {
 
       <header className="top-rail">
         <div className="brand-block">
-          <p className="eyebrow">Local Risk Guard</p>
+          <p className="eyebrow">Commute Copilot</p>
           <h1>native</h1>
-          <p className="tagline">Become local, stay safe, act with confidence.</p>
+          <p className="tagline">Understand announcements, avoid scams, move like a local.</p>
         </div>
 
         <div className="rail-controls">
-          <div className="chip-group mode-chip-group">
-            {(Object.keys(MODE_DETAILS) as NativeMode[]).map((mode) => (
-              <button
-                key={mode}
-                className={cn("rail-chip", { active: activeMode === mode })}
-                onClick={() =>
-                  setActiveMode((current) => (current === mode ? null : mode))
-                }
-              >
-                {MODE_DETAILS[mode].title}
-              </button>
-            ))}
-          </div>
-
-          <div className="scene-row">
-            <label htmlFor="scene-select">Scene</label>
+          <div className="home-row">
+            <label htmlFor="home-language">Home Language</label>
             <select
-              id="scene-select"
-              value={selectedSceneId}
-              onChange={(event) => void applyScenePreset(event.target.value)}
-            >
-              {DEMO_SCENES.map((scene) => (
-                <option key={scene.id} value={scene.id}>
-                  {scene.label}
-                </option>
-              ))}
-            </select>
-            <span className="scene-hint-inline">{activeScene?.scriptHint}</span>
-          </div>
-
-          <div className="pair-row">
-            <label htmlFor="source-language">Local</label>
-            <select
-              id="source-language"
-              value={sourceLanguage.id}
+              id="home-language"
+              value={homeLanguage.id}
               onChange={(event) =>
-                setSourceLanguage(getLanguage(event.target.value, sourceLanguage))
-              }
-            >
-              {LANGUAGES.map((language) => (
-                <option key={language.id} value={language.id}>
-                  {language.label}
-                </option>
-              ))}
-            </select>
-
-            <label htmlFor="target-language">Home</label>
-            <select
-              id="target-language"
-              value={targetLanguage.id}
-              onChange={(event) =>
-                setTargetLanguage(getLanguage(event.target.value, targetLanguage))
+                setHomeLanguage(getLanguage(event.target.value, homeLanguage))
               }
             >
               {LANGUAGES.map((language) => (
@@ -1338,37 +1578,66 @@ function NativeConsole() {
               ))}
             </select>
           </div>
-        </div>
 
-        <div className="rail-actions">
-          <button
-            className={cn("session-toggle", {
-              connected,
-              disabled: sessionHealth.reconnecting,
-            })}
-            onClick={() => void toggleConnection()}
-            disabled={sessionHealth.reconnecting}
-          >
-            {sessionHealth.reconnecting
-              ? "Reconnecting..."
-              : connected
-              ? "Pause"
-              : "Start"}
-          </button>
+          <div className="action-row">
+            <button
+              className={cn("control-chip", "primary", {
+                connected,
+                disabled: sessionHealth.reconnecting,
+              })}
+              onClick={() => void toggleConnection()}
+              disabled={sessionHealth.reconnecting}
+            >
+              {sessionHealth.reconnecting ? "Reconnecting..." : connected ? "Pause" : "Start"}
+            </button>
 
-          <button
-            className={cn("risk-toggle", { active: riskGuardState.enabled })}
-            onClick={() => setRiskGuardEnabled((value) => !value)}
-          >
-            Risk Guard {riskGuardState.enabled ? "On" : "Off"}
-          </button>
+            <button
+              className={cn("control-chip", { active: micEnabled })}
+              onClick={() => void onMicToggle()}
+            >
+              Mic {micEnabled ? "On" : "Off"}
+            </button>
+
+            <button
+              className={cn("control-chip", { active: visionEnabled })}
+              onClick={() => void onVisualToggle()}
+            >
+              Vision {visionEnabled ? "On" : "Off"}
+            </button>
+
+            <button
+              className={cn("control-chip", { active: riskGuardState.enabled })}
+              onClick={() => setRiskGuardEnabled((value) => !value)}
+            >
+              Risk Guard {riskGuardState.enabled ? "On" : "Off"}
+            </button>
+          </div>
+
+          <div className="intent-row">
+            <span className="info-pill">
+              Intent: {autoIntent.replace("_", " ")}
+            </span>
+            <span className="info-pill">
+              Detected: {detectedIncomingLanguage
+                ? `${detectedIncomingLanguage.label} (${Math.round(
+                    detectedIncomingLanguage.confidence * 100,
+                  )}%)`
+                : "Waiting"}
+            </span>
+            <span className={cn("info-pill", { accent: translationRequired })}>
+              {translationRequired
+                ? `Translating to ${homeLanguage.label}`
+                : `Same language (${homeLanguage.label})`}
+            </span>
+            <span className={cn("info-pill", "speech")}>Speech: {speechHealthLabel}</span>
+          </div>
         </div>
       </header>
 
       <main className="command-main">
         <section className="vision-panel">
           <div className="panel-head">
-            <strong>Live View</strong>
+            <strong>Live Input</strong>
             <div className="source-switch">
               <button
                 className={cn({ active: visualSource === "camera" })}
@@ -1395,41 +1664,33 @@ function NativeConsole() {
             {!activeStream && (
               <div className="empty-state">
                 <p>Visual input is off</p>
-                <span>Enable Camera or Screen for Spot and Guide modes.</span>
+                <span>Enable Camera or Screen for station boards and signs.</span>
               </div>
             )}
           </div>
 
-          <div className="control-strip">
-            <button
-              className={cn("control-chip", { active: micEnabled })}
-              onClick={() => void onMicToggle()}
-            >
-              Mic {micEnabled ? "On" : "Off"}
-            </button>
-            <button
-              className={cn("control-chip", { active: visionEnabled })}
-              onClick={() => void onVisualToggle()}
-            >
-              Vision {visionEnabled ? "On" : "Off"}
-            </button>
-            <button
-              className={cn("control-chip", {
-                active: searchEnabled,
-                disabled: activeMode !== "GUIDE",
-              })}
-              onClick={() => setSearchEnabled((value) => !value)}
-              disabled={activeMode !== "GUIDE"}
-            >
-              Search {searchEnabled ? "On" : "Off"}
-            </button>
+          <div className="input-card">
+            <span>You hear</span>
+            <p>{lastInputTranscript || "Listening for announcement/conversation..."}</p>
           </div>
         </section>
 
-        <section className="risk-panel">
+        <section className="assistant-panel">
           <div className="panel-head">
-            <strong>Local Risk Guard</strong>
-            <span className="mode-tag">{activeMode || "Standby"}</span>
+            <strong>native response</strong>
+            <span className="mode-tag">Auto Flow</span>
+          </div>
+
+          <div className="response-card">
+            <p>
+              <strong>Heard:</strong> {responseCard.heard || lastInputTranscript || "..."}
+            </p>
+            <p>
+              <strong>Meaning:</strong> {responseCard.meaning || lastOutputTranscript || "..."}
+            </p>
+            <p>
+              <strong>What to do now:</strong> {responseCard.action || "Waiting for actionable cue."}
+            </p>
           </div>
 
           <div
@@ -1443,7 +1704,7 @@ function NativeConsole() {
             {!riskGuardState.currentRisk ? (
               <>
                 <p className="risk-level">No active risk signal</p>
-                <p className="risk-line">Listening for price, misinformation, and urgency cues.</p>
+                <p className="risk-line">Scam pressure, misinformation, and overcharge cues are monitored.</p>
               </>
             ) : (
               <>
@@ -1454,52 +1715,42 @@ function NativeConsole() {
                 <p className="risk-cue">"{riskGuardState.currentRisk.cue}"</p>
                 <p className="risk-line">Why: {riskGuardState.currentRisk.reason}</p>
                 <p className="risk-line strong">What next: {riskGuardState.currentRisk.action}</p>
-                {riskGuardState.currentRisk.baselineReference && (
-                  <p className="risk-line">
-                    Baseline: {riskGuardState.currentRisk.baselineReference}
-                  </p>
-                )}
               </>
             )}
           </div>
 
           <div className="status-grid">
             {liveStatuses.map((status) => (
-              <div
-                key={status.label}
-                className={cn("status-chip", { active: status.active })}
-              >
+              <div key={status.label} className={cn("status-chip", { active: status.active })}>
                 {status.label}
               </div>
             ))}
           </div>
-
-          <div className="risk-mini-history">
-            <p>Recent signals</p>
-            {riskGuardState.history.length === 0 ? (
-              <span className="history-empty">No signals yet.</span>
-            ) : (
-              <ul>
-                {riskGuardState.history.slice(0, 4).map((risk) => (
-                  <li key={risk.id}>
-                    <strong>{risk.level}</strong> {risk.type}: {risk.action}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
         </section>
       </main>
 
-      <section className="live-strip">
-        <div className="live-cell">
-          <span>You hear</span>
-          <p>{lastInputTranscript || "..."}</p>
-        </div>
-        <div className="live-cell">
-          <span>native says</span>
-          <p>{lastOutputTranscript || "..."}</p>
-        </div>
+      <section className="grounding-strip">
+        <button
+          className={cn("grounding-button", { active: activeGroundingAction === "fare_check" })}
+          onClick={() => runGroundingAction("fare_check")}
+          disabled={!connected}
+        >
+          Fare Check
+        </button>
+        <button
+          className={cn("grounding-button", { active: activeGroundingAction === "rule_check" })}
+          onClick={() => runGroundingAction("rule_check")}
+          disabled={!connected}
+        >
+          Rule Check
+        </button>
+        <button
+          className={cn("grounding-button", { active: activeGroundingAction === "station_help" })}
+          onClick={() => runGroundingAction("station_help")}
+          disabled={!connected}
+        >
+          Station Help
+        </button>
       </section>
 
       <details
@@ -1524,6 +1775,7 @@ function NativeConsole() {
                 </option>
               ))}
             </select>
+            <span className="debug-pill">Speech health: {speechHealthLabel}</span>
           </div>
 
           <div className="permission-row">
@@ -1573,9 +1825,6 @@ function NativeConsole() {
               Send
             </button>
           </form>
-
-          {/* Blind mode hooks intentionally not rendered in production path. */}
-          {FEATURE_FLAGS.blindMode ? null : null}
         </div>
       </details>
     </div>
